@@ -1,1 +1,1 @@
-# SMNA2026-A2-MentalHealth
+# SMNA2026-A2-github-networks
