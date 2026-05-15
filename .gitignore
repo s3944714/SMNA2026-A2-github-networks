@@ -6,3 +6,4 @@ data/raw/
 .ipynb_checkpoints/
 
 outputs/tables/
+data/processed/*.csv
