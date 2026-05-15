@@ -2,3 +2,7 @@
 # Environment variables
 .env
 .DS_Store
+data/raw/
+.ipynb_checkpoints/
+
+outputs/tables/
