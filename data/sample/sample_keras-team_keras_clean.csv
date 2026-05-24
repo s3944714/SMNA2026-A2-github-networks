@@ -1,0 +1,142 @@
+id,type,author,text,clean_text,state,created_at,closed_at,parent_id,parent_author,labels,issue_number,comment_count
+issue_22887,issue,AkshatRaj00,"keras.ops.conv_transpose skips input-channel validation in symbolic path ### Summary
+`keras.ops.conv_transpose` appears to skip input-channel validation in the symbolic path.
+
+### Problem
+When using the symbolic path, invalid input channels are not validated consistently with the eager path. This can lead to late or backend-specific failures instead of a clear early error.
+
+### Expected behavior
+Both symbolic and eager paths should validate input channels consistently and raise a clear error for invalid channel shapes.
+
+### Why this matters
+- inconsistent user experience
+- harder debugging
+- delayed failure
+- backend-specific confusion
+
+### Minimal repro
+[add a small reproducible snippet here]
+
+### Notes
+This seems related to input validation consistency in backend ops and may affect debugging across backends.","keras.ops.conv_transpose skips input-channel validation in symbolic path summary appears to skip input-channel validation in the symbolic path. problem when using the symbolic path, invalid input channels are not validated consistently with the eager path. this can lead to late or backend-specific failures instead of a clear early error. expected behavior both symbolic and eager paths should validate input channels consistently and raise a clear error for invalid channel shapes. why this matters - inconsistent user experience - harder debugging - delayed failure - backend-specific confusion minimal repro add a small reproducible snippet here notes this seems related to input validation consistency in backend ops and may affect debugging across backends.",open,2026-05-13 10:58:04+00:00,,,,,22887,5
+comment_4440541839,comment,ChiragSW,@AkshatRaj00 any reproduction script?,any reproduction script?,open,2026-05-13 11:38:25+00:00,,issue_22887,AkshatRaj00,,22887,0
+comment_4442737159,comment,dhantule,"@AkshatRaj00, 
+please provide the code to reproduce this issue, thanks !",", please provide the code to reproduce this issue, thanks !",open,2026-05-13 15:42:56+00:00,,issue_22887,AkshatRaj00,,22887,0
+comment_4443501675,comment,AkshatRaj00,"> [@AkshatRaj00](https://github.com/AkshatRaj00), please provide the code to reproduce this issue, thanks !
+
+Thanks for looking into this.
+
+Here is a minimal reproducible example:
+
+```python
+# minimal code snippet here
+```
+
+Steps to reproduce:
+1. Run the snippet.
+2. Use the invalid input shape / channels.
+3. Observe that symbolic path skips validation.
+
+Expected behavior:
+Both symbolic and eager paths should validate input channels consistently and raise a clear error.
+
+Actual behavior:
+The eager path raises the expected error, but the symbolic path does not validate correctly.
+
+If needed, I can reduce this further or provide a notebook.","( please provide the code to reproduce this issue, thanks ! thanks for looking into this. here is a minimal reproducible example: steps to reproduce: 1. run the snippet. 2. use the invalid input shape channels. 3. observe that symbolic path skips validation. expected behavior: both symbolic and eager paths should validate input channels consistently and raise a clear error. actual behavior: the eager path raises the expected error, but the symbolic path does not validate correctly. if needed, i can reduce this further or provide a notebook.",open,2026-05-13 17:09:52+00:00,,issue_22887,AkshatRaj00,,22887,0
+comment_4443513858,comment,AkshatRaj00,"> [@AkshatRaj00](https://github.com/AkshatRaj00) any reproduction script?
+
+Thanks for the follow-up.
+
+Here is a minimal reproduction snippet:
+
+```python
+# minimal repro code here
+```
+
+Steps to reproduce:
+1. Run the snippet.
+2. Use the invalid input / channel shape.
+3. Observe that the symbolic path skips validation.
+
+Expected behavior:
+Both symbolic and eager paths should validate input channels consistently and raise a clear error.
+
+Actual behavior:
+The eager path raises the expected error, but the symbolic path does not.
+
+If needed, I can further reduce this into a smaller repro.","( any reproduction script? thanks for the follow-up. here is a minimal reproduction snippet: steps to reproduce: 1. run the snippet. 2. use the invalid input channel shape. 3. observe that the symbolic path skips validation. expected behavior: both symbolic and eager paths should validate input channels consistently and raise a clear error. actual behavior: the eager path raises the expected error, but the symbolic path does not. if needed, i can further reduce this into a smaller repro.",open,2026-05-13 17:11:33+00:00,,issue_22887,AkshatRaj00,,22887,0
+comment_4443544145,comment,AkshatRaj00,"Thanks for the follow-up. Here is a minimal reproduction script:
+
+```python
+import numpy as np
+import keras
+from keras import ops
+
+print(""Keras version:"", keras.__version__)
+print(""Backend:"", keras.backend.backend())
+
+# Input has 3 channels
+x_np = np.random.randn(2, 8, 8, 3).astype(""float32"")
+
+# Kernel expects 5 input channels (intentional mismatch)
+# For conv_transpose with channels_last:
+# kernel shape = (kernel_h, kernel_w, filters, input_channels)
+kernel_np = np.random.randn(3, 3, 4, 5).astype(""float32"")
+
+print(""Input shape:"", x_np.shape)
+print(""Kernel shape:"", kernel_np.shape)
+
+print(""\n=== Eager path ==="")
+try:
+    y_eager = ops.conv_transpose(
+        x_np,
+        kernel_np,
+        strides=(1, 1),
+        padding=""valid"",
+        data_format=""channels_last"",
+    )
+    print(""Eager output shape:"", y_eager.shape)
+except Exception as e:
+    print(""Eager raised:"", type(e).__name__, e)
+
+print(""\n=== Symbolic path ==="")
+try:
+    x = keras.Input(shape=(8, 8, 3))
+    k = ops.convert_to_tensor(kernel_np)
+    y = ops.conv_transpose(
+        x,
+        k,
+        strides=(1, 1),
+        padding=""valid"",
+        data_format=""channels_last"",
+    )
+    model = keras.Model(x, y)
+    print(""Symbolic model output shape:"", model.output_shape)
+except Exception as e:
+    print(""Symbolic raised:"", type(e).__name__, e)
+```
+
+Steps to reproduce:
+1. Run the script above.
+2. The input tensor has 3 channels.
+3. The kernel is intentionally created with 5 input channels.
+4. Compare eager path vs symbolic path behavior.
+
+Expected behavior:
+Both eager and symbolic paths should validate the input-channel mismatch consistently and raise a clear error.
+
+Actual behavior:
+The eager path raises an error for the invalid channel configuration, but the symbolic path appears to skip that validation / behaves inconsistently.
+
+Environment:
+- Keras: `<your keras version>`
+- Backend: `<tensorflow / jax / torch>`
+- Python: `<your python version>`
+- OS: `<your OS>`
+
+If useful, I can also reduce this further or test the same repro on another backend.","thanks for the follow-up. here is a minimal reproduction script: steps to reproduce: 1. run the script above. 2. the input tensor has 3 channels. 3. the kernel is intentionally created with 5 input channels. 4. compare eager path vs symbolic path behavior. expected behavior: both eager and symbolic paths should validate the input-channel mismatch consistently and raise a clear error. actual behavior: the eager path raises an error for the invalid channel configuration, but the symbolic path appears to skip that validation behaves inconsistently. environment: - keras: - backend: - python: - os: if useful, i can also reduce this further or test the same repro on another backend.",open,2026-05-13 17:15:57+00:00,,issue_22887,AkshatRaj00,,22887,0
+issue_22879,issue,pikim9037-dotcom,Myanmar Copyright© 1995-2026 Samsung. All rights reserved. Samsung Malaysia Electronics (SME) Sdn. Bhd. 200301026766 (629186-D).,myanmar copyright 1995-2026 samsung. all rights reserved. samsung malaysia electronics (sme) sdn. bhd. 200301026766 (629186-d).,closed,2026-05-12 22:00:17+00:00,2026-05-13 09:52:31+00:00,,,,22879,1
+comment_4439652102,comment,dhantule,closing this issue as this is unrelated to keras,closing this issue as this is unrelated to keras,closed,2026-05-13 09:52:31+00:00,,issue_22879,pikim9037-dotcom,,22879,0
+issue_22878,issue,pikim9037-dotcom,kkabu4277@gmail.com ,kkabu4277 .com,closed,2026-05-12 21:59:26+00:00,2026-05-13 09:52:20+00:00,,,,22878,1
+comment_4439649707,comment,dhantule,closing this issue as this is unrelated to keras,closing this issue as this is unrelated to keras,closed,2026-05-13 09:52:15+00:00,,issue_22878,pikim9037-dotcom,,22878,0

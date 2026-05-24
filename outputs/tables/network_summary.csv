@@ -1,0 +1,6 @@
+repo,nodes,edges,density,communities,modularity,max_k_core,top_pr_node,sc1_pass,sc3_pass
+scikit-learn/scikit-learn,769,2239,0.003791,12,0.3788,10,glemaitre,True,True
+huggingface/transformers,948,1975,0.0022,21,0.5408,5,qgallouedec,True,True
+pytorch/pytorch,409,1012,0.006065,14,0.564,5,atalman,True,True
+keras-team/keras,758,2167,0.003777,10,0.4663,8,innat,True,True
+langchain-ai/langchain,839,1449,0.002061,20,0.6545,4,mdrxy,True,True

@@ -1,0 +1,6 @@
+repo,n_users,rho_pagerank,p_pagerank,rho_composite,p_composite,sc6_pass
+scikit-learn/scikit-learn,421,-0.0613,0.209085,-0.0517,0.290304,False
+huggingface/transformers,517,-0.0319,0.469851,-0.0432,0.326985,False
+pytorch/pytorch,281,-0.1198,0.044875,-0.1407,0.018256,True
+keras-team/keras,485,-0.0811,0.074525,-0.1009,0.026345,False
+langchain-ai/langchain,412,-0.2207,6e-06,-0.2365,1e-06,True

@@ -4,6 +4,8 @@
 .DS_Store
 data/raw/
 .ipynb_checkpoints/
+.~$rksheet_s3944714_PG_Group_17.docx
+.~$SC2671.docx
 
-outputs/tables/
-data/processed/*.csv
+
+

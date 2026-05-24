@@ -1,0 +1,6 @@
+repo,n_open,n_closed,mean_open,mean_closed,U_statistic,p_value,sc5_pass
+scikit-learn/scikit-learn,424,1305,0.3393,0.135,330883.0,0.0,True
+huggingface/transformers,250,1740,0.5672,0.291,292853.0,0.0,True
+pytorch/pytorch,786,938,0.0186,-0.0943,399660.0,0.002549,True
+keras-team/keras,154,1841,0.2313,0.0943,160731.0,0.005722,True
+langchain-ai/langchain,409,1584,0.0913,-0.1319,381089.0,0.0,True

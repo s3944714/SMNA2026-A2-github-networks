@@ -1,0 +1,705 @@
+id,type,author,text,clean_text,state,created_at,closed_at,parent_id,parent_author,labels,issue_number,comment_count
+issue_37426,issue,jboreiko,"Add tool_call_id to on_tool_start event's data ### Submission checklist
+
+- [x] This is a feature request, not a bug report or usage question.
+- [x] I added a clear and descriptive title that summarizes the feature request.
+- [x] I used the GitHub search to find a similar feature request and didn't find it.
+- [x] I checked the LangChain documentation and API reference to see if this feature already exists.
+- [x] This is not related to the langchain-community package.
+
+### Package (Required)
+
+- [ ] langchain
+- [ ] langchain-openai
+- [ ] langchain-anthropic
+- [ ] langchain-classic
+- [x] langchain-core
+- [ ] langchain-model-profiles
+- [ ] langchain-tests
+- [ ] langchain-text-splitters
+- [ ] langchain-chroma
+- [ ] langchain-deepseek
+- [ ] langchain-exa
+- [ ] langchain-fireworks
+- [ ] langchain-groq
+- [ ] langchain-huggingface
+- [ ] langchain-mistralai
+- [ ] langchain-nomic
+- [ ] langchain-ollama
+- [ ] langchain-openrouter
+- [ ] langchain-perplexity
+- [ ] langchain-qdrant
+- [ ] langchain-xai
+- [ ] Other / not sure / general
+
+### Feature Description
+
+The `on_tool_start` stream event currently exposes `name`, `tags`, `run_id`, `metadata`, `parent_ids`, and `data.input` — but **not** `tool_call_id`.
+
+LangChain already tracks `tool_call_id` for each tool run: `BaseTool.arun` passes it to the callback manager, `_AstreamEventsCallbackHandler` stores it in `run_info` during `on_tool_start` (since #33731), and it's surfaced on `on_tool_error.data` (also #33731). The data is right there; it's just not emitted on `on_tool_start`.
+  
+  ```python
+  import asyncio
+  from langchain.agents import create_agent
+  from langchain_core.tools import tool
+  
+  @tool
+  def slow_lookup(query: str) -> str:
+      """"""A tool that takes a bit of time so we can observe its start event.""""""
+      return f""result for {query}""
+  
+  agent = create_agent(model=..., tools=[slow_lookup])
+  
+  async def demonstrate_issue():
+      async for event in agent.astream_events(
+          {""messages"": ""look up alpha and beta in parallel""},
+          version=""v2"",
+      ):
+          if event[""event""] == ""on_tool_start"":
+              # event[""data""] has ""input"" but no ""tool_call_id""
+              assert ""tool_call_id"" not in event[""data""]
+  
+  asyncio.run(demonstrate_issue())
+
+### Use Case
+
+Streaming UI consumers building per-tool-call panels need to attribute every on_tool_* event to the originating tool call as soon as the tool starts — not wait for on_tool_end / on_tool_error. This matters especially under parallel tool calls of the same tool (e.g., a supervisor agent dispatching several sub-agents of the same kind in one assistant turn), where name alone isn't sufficient to disambiguate which streamed events belong to which call, and falling back to run_id/parent traversal is fragile.
+  
+on_tool_error already exposes tool_call_id in its event data (added in #33731). Doing the same for on_tool_start is the natural parity.
+
+### Proposed Solution
+
+Mirror the on_tool_error change from #33731 on the on_tool_start send:
+  
+```python
+  # libs/core/langchain_core/tracers/event_stream.py — in on_tool_start
+  self._send(
+      {
+          ""event"": ""on_tool_start"",
+          ""data"": {
+              ""input"": inputs or {},
+              ""tool_call_id"": kwargs.get(""tool_call_id""),   # ← new
+          },
+          ""name"": name_,
+          ""tags"": tags or [],
+          ""run_id"": str(run_id),
+          ""metadata"": metadata or {},
+          ""parent_ids"": self._get_parent_ids(run_id),
+      },
+      ""tool"",
+  )
+```
+  The kwarg is already passed in (it's used at line 311 to populate run_info);
+  this just surfaces it on the emitted event too.
+
+### Alternatives Considered
+
+  - Reading the streamed metadata field. Possible if the BE manually
+  splices tool_call_id into the tool's runtime config metadata via a
+  BaseTool subclass that overrides ainvoke. Works, but every downstream
+  agent author has to invent the same workaround. The data should be
+  first-class on the event.
+  - Walking parent_ids / run_id to recover the originating tool call.
+  Fragile — LangGraph collapses parent relationships, and run_id is
+  separate from tool_call_id.
+
+### Additional Context
+
+Parallel to #33597 / #33731. Same justification (stateless agents, streaming-UI tool-call mapping), same one-line surface fix.","add toolcallid to ontoolstart event's data submission checklist - x this is a feature request, not a bug report or usage question. - x i added a clear and descriptive title that summarizes the feature request. - x i used the github search to find a similar feature request and didn't find it. - x i checked the langchain documentation and api reference to see if this feature already exists. - x this is not related to the langchain-community package. package (required) - langchain - langchain-openai - langchain-anthropic - langchain-classic - x langchain-core - langchain-model-profiles - langchain-tests - langchain-text-splitters - langchain-chroma - langchain-deepseek - langchain-exa - langchain-fireworks - langchain-groq - langchain-huggingface - langchain-mistralai - langchain-nomic - langchain-ollama - langchain-openrouter - langchain-perplexity - langchain-qdrant - langchain-xai - other not sure general feature description the stream event currently exposes , , , , , and but not . langchain already tracks for each tool run: passes it to the callback manager, stores it in during (since 33731), and it's surfaced on (also 33731). the data is right there; it's just not emitted on . python libs core langchaincore tracers eventstream.py in ontoolstart self.send( event : ontoolstart , data : input : inputs or , toolcallid : kwargs.get( toolcallid ), new , name : name, tags : tags or , runid : str(runid), metadata : metadata or , parentids : self.getparentids(runid), , tool , ) the kwarg is already passed in (it's used at line 311 to populate runinfo); this just surfaces it on the emitted event too. alternatives considered - reading the streamed metadata field. possible if the be manually splices toolcallid into the tool's runtime config metadata via a basetool subclass that overrides ainvoke. works, but every downstream agent author has to invent the same workaround. the data should be first-class on the event. - walking parentids runid to recover the originating tool call. fragile langgraph collapses parent relationships, and runid is separate from toolcall_id. additional context parallel to 33597 33731. same justification (stateless agents, streaming-ui tool-call mapping), same one-line surface fix.",open,2026-05-14 12:43:46+00:00,,,,"core, feature request, external",37426,0
+issue_37423,issue,shivam-poriya,"HTMLSemanticPreservingSplitter processes malformed and unsafe links ### Submission checklist
+
+- [x] This is a bug, not a usage question.
+- [x] I added a clear and descriptive title that summarizes this issue.
+- [x] I used the GitHub search to find a similar question and didn't find it.
+- [x] I am sure that this is a bug in LangChain rather than my code.
+- [x] The bug is not resolved by updating to the latest stable version of LangChain (or the specific integration package).
+- [x] This is not related to the langchain-community package.
+- [x] I posted a self-contained, minimal, reproducible example. A maintainer can copy it and run it AS IS.
+
+### Package (Required)
+
+- [ ] langchain
+- [ ] langchain-openai
+- [ ] langchain-anthropic
+- [ ] langchain-classic
+- [ ] langchain-core
+- [ ] langchain-model-profiles
+- [ ] langchain-tests
+- [x] langchain-text-splitters
+- [ ] langchain-chroma
+- [ ] langchain-deepseek
+- [ ] langchain-exa
+- [ ] langchain-fireworks
+- [ ] langchain-groq
+- [ ] langchain-huggingface
+- [ ] langchain-mistralai
+- [ ] langchain-nomic
+- [ ] langchain-ollama
+- [ ] langchain-openrouter
+- [ ] langchain-perplexity
+- [ ] langchain-qdrant
+- [ ] langchain-xai
+- [ ] Other / not sure / general
+
+### Related Issues / PRs
+
+_No response_
+
+### Reproduction Steps / Example Code (Python)
+
+```python
+from langchain_text_splitters.html import HTMLSemanticPreservingSplitter
+
+html = """"""
+
+<html>
+    <body>
+        <p><a href="""">Empty Link</a></p>
+        <p><a href=""javascript:void(0)"">Bad Link</a></p>
+        <p><a href=""https://example.com"">Valid Link</a></p>
+    </body>
+</html>
+""""""
+
+splitter = HTMLSemanticPreservingSplitter(
+headers_to_split_on=[(""h1"", ""Header 1"")],
+preserve_links=True,
+)
+
+docs = splitter.split_text(html)
+
+for doc in docs:
+print(doc.page_content)
+```
+
+### Error Message and Stack Trace (if applicable)
+
+```shell
+
+```
+
+### Description
+
+`HTMLSemanticPreservingSplitter` currently processes malformed or unsafe links such as empty `href` values and `javascript:` pseudo-links.
+
+This can generate invalid markdown links and unintentionally preserve unsafe pseudo-links during HTML processing.
+
+Expected behavior:
+
+* Empty or malformed links should be skipped
+* `javascript:` pseudo-links should not be preserved
+* Valid links should continue to work normally
+
+
+### System Info
+
+PS C:\Users\Acer> python -m langchain_core.sys_info
+C:\Python314\Lib\site-packages\langchain_core\_api\deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+System Information
+------------------
+> OS:  Windows
+> OS Version:  10.0.26200
+> Python Version:  3.14.0 (tags/v3.14.0:ebf955d, Oct  7 2025, 10:15:03) [MSC v.1944 64 bit (AMD64)]
+
+Package Information
+-------------------
+> langchain_core: 1.2.28
+> langchain: 1.2.15
+> langsmith: 0.7.29
+> langchain_anthropic: 1.4.0
+> langchain_google_genai: 4.2.1
+> langchain_groq: 1.1.2
+> langchain_huggingface: 1.2.1
+> langchain_openai: 1.1.12
+> langgraph_sdk: 0.3.13
+
+Optional packages not installed
+-------------------------------
+> deepagents
+> deepagents-cli
+
+Other Dependencies
+------------------
+> anthropic: 0.92.0
+> filetype: 1.2.0
+> google-genai: 1.71.0
+> groq: 0.37.1
+> httpx: 0.28.1
+> huggingface-hub: 1.9.2
+> jsonpatch: 1.33
+> langgraph: 1.1.6
+> openai: 2.31.0
+> orjson: 3.11.8
+> packaging: 26.0
+> pydantic: 2.12.4
+> pyyaml: 6.0.3
+> requests: 2.32.5
+> requests-toolbelt: 1.0.0
+> rich: 14.3.3
+> tenacity: 9.1.4
+> tiktoken: 0.12.0
+> tokenizers: 0.22.2
+> transformers: 5.5.1
+> typing-extensions: 4.15.0
+> uuid-utils: 0.14.1
+> websockets: 15.0.1
+> xxhash: 3.6.0
+> zstandard: 0.25.0","htmlsemanticpreservingsplitter processes malformed and unsafe links submission checklist - x this is a bug, not a usage question. - x i added a clear and descriptive title that summarizes this issue. - x i used the github search to find a similar question and didn't find it. - x i am sure that this is a bug in langchain rather than my code. - x the bug is not resolved by updating to the latest stable version of langchain (or the specific integration package). - x this is not related to the langchain-community package. - x i posted a self-contained, minimal, reproducible example. a maintainer can copy it and run it as is. package (required) - langchain - langchain-openai - langchain-anthropic - langchain-classic - langchain-core - langchain-model-profiles - langchain-tests - x langchain-text-splitters - langchain-chroma - langchain-deepseek - langchain-exa - langchain-fireworks - langchain-groq - langchain-huggingface - langchain-mistralai - langchain-nomic - langchain-ollama - langchain-openrouter - langchain-perplexity - langchain-qdrant - langchain-xai - other not sure general related issues prs no response reproduction steps example code (python) error message and stack trace (if applicable) description currently processes malformed or unsafe links such as empty values and pseudo-links. this can generate invalid markdown links and unintentionally preserve unsafe pseudo-links during html processing. expected behavior: empty or malformed links should be skipped pseudo-links should not be preserved valid links should continue to work normally system info ps c: users acer python -m langchaincore.sysinfo c: python314 lib site-packages langchaincore api deprecation.py:25: userwarning: core pydantic v1 functionality isn't compatible with python 3.14 or greater. from pydantic.v1.fields import fieldinfo as fieldinfov1 system information ------------------ os: windows os version: 10.0.26200 python version: 3.14.0 (tags v3.14.0:ebf955d, oct 7 2025, 10:15:03) msc v.1944 64 bit (amd64) package information ------------------- langchaincore: 1.2.28 langchain: 1.2.15 langsmith: 0.7.29 langchainanthropic: 1.4.0 langchaingooglegenai: 4.2.1 langchaingroq: 1.1.2 langchainhuggingface: 1.2.1 langchainopenai: 1.1.12 langgraph_sdk: 0.3.13 optional packages not installed ------------------------------- deepagents deepagents-cli other dependencies ------------------ anthropic: 0.92.0 filetype: 1.2.0 google-genai: 1.71.0 groq: 0.37.1 httpx: 0.28.1 huggingface-hub: 1.9.2 jsonpatch: 1.33 langgraph: 1.1.6 openai: 2.31.0 orjson: 3.11.8 packaging: 26.0 pydantic: 2.12.4 pyyaml: 6.0.3 requests: 2.32.5 requests-toolbelt: 1.0.0 rich: 14.3.3 tenacity: 9.1.4 tiktoken: 0.12.0 tokenizers: 0.22.2 transformers: 5.5.1 typing-extensions: 4.15.0 uuid-utils: 0.14.1 websockets: 15.0.1 xxhash: 3.6.0 zstandard: 0.25.0",open,2026-05-14 11:13:22+00:00,,,,"bug, text-splitters, external",37423,1
+comment_4450212947,comment,shivam-poriya,"Hi, I’ve already implemented a fix for this issue and opened a PR for it. Could I please be assigned to this issue so the PR can be reviewed?
+
+Thank you!
+","hi, i ve already implemented a fix for this issue and opened a pr for it. could i please be assigned to this issue so the pr can be reviewed? thank you!",open,2026-05-14 11:20:45+00:00,,issue_37423,shivam-poriya,,37423,0
+issue_37421,issue,prasodani,"ChatOpenAI.with_structured_output(..., method=""json_schema"").stream() drops response headers / x-request-id in response_metadata ### Submission checklist
+
+- [x] This is a bug, not a usage question.
+- [x] I added a clear and descriptive title that summarizes this issue.
+- [x] I used the GitHub search to find a similar question and didn't find it.
+- [x] I am sure that this is a bug in LangChain rather than my code.
+- [x] The bug is not resolved by updating to the latest stable version of LangChain (or the specific integration package).
+- [x] This is not related to the langchain-community package.
+- [x] I posted a self-contained, minimal, reproducible example. A maintainer can copy it and run it AS IS.
+
+### Package (Required)
+
+- [x] langchain
+- [x] langchain-openai
+- [ ] langchain-anthropic
+- [ ] langchain-classic
+- [x] langchain-core
+- [ ] langchain-model-profiles
+- [ ] langchain-tests
+- [ ] langchain-text-splitters
+- [ ] langchain-chroma
+- [ ] langchain-deepseek
+- [ ] langchain-exa
+- [ ] langchain-fireworks
+- [ ] langchain-groq
+- [ ] langchain-huggingface
+- [ ] langchain-mistralai
+- [ ] langchain-nomic
+- [ ] langchain-ollama
+- [ ] langchain-openrouter
+- [ ] langchain-perplexity
+- [ ] langchain-qdrant
+- [ ] langchain-xai
+- [ ] Other / not sure / general
+
+### Related Issues / PRs
+
+_No response_
+
+### Reproduction Steps / Example Code (Python)
+
+```python
+from pathlib import Path
+from typing import Any
+
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
+
+
+class SimpleAnswer(BaseModel):
+    answer: str
+
+
+class HeaderCaptureHandler(BaseCallbackHandler):
+    """"""Records whether ``x-request-id`` arrived via on_llm_end / on_llm_new_token.""""""
+
+    def __init__(self) -> None:
+        self.x_request_id: str | None = None
+
+    def _grab(self, message: Any) -> None:
+        if message is None:
+            return
+        headers = (getattr(message, 'response_metadata', None) or {}).get('headers') or {}
+        rid = headers.get('x-request-id') or headers.get('X-Request-Id')
+        if rid and self.x_request_id is None:
+            self.x_request_id = rid
+
+    def on_llm_new_token(self, token: str, *, chunk: Any = None, **kwargs: Any) -> None:
+        self._grab(chunk)
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        for gen_list in getattr(response, 'generations', None) or []:
+            for gen in gen_list:
+                self._grab(getattr(gen, 'message', None))
+
+
+def run_case(label: str, runnable: Any) -> None:
+    handler = HeaderCaptureHandler()
+    for _ in runnable.stream('Say hello in one word.', config={'callbacks': [handler]}):
+        pass
+    status = handler.x_request_id or '<MISSING>'
+    print(f'{label:50s} x-request-id={status}')
+
+
+llm = ChatOpenAI(model='gpt-4.1-mini', streaming=True, include_response_headers=True)
+
+run_case('A) plain streaming                              ', llm)
+run_case('B) streaming + with_structured_output(json_schema)', llm.with_structured_output(SimpleAnswer, method='json_schema'))
+```
+
+### Error Message and Stack Trace (if applicable)
+
+```shell
+
+```
+
+### Description
+
+Hi team,
+
+We’re seeing inconsistent response header propagation when using LangChain structured output + streaming with OpenAI models.
+
+Summary
+
+When using:
+```
+chat_model.with_structured_output(
+    SimpleAnswer,
+    method=""json_schema""
+).stream(...)
+```
+the streamed AIMessageChunk / final message objects do not contain HTTP response headers (specifically x-request-id) inside response_metadata.
+
+However, the same observability flow works correctly for:
+
+non-structured streaming
+AzureChatOpenAI structured streaming
+regular create(stream=True, include_response_headers=True) paths
+
+This makes it difficult to correlate streamed requests with provider-side logs/incidents.
+
+### System Info
+
+Package Information
+-------------------
+> langchain_core: 1.2.29
+> langchain: 1.2.15
+> langchain_community: 0.4.1
+> langsmith: 0.3.45
+> langchain_aws: 1.4.3
+> langchain_classic: 1.0.3
+> langchain_google_genai: 4.2.1
+> langchain_google_vertexai: 2.1.2
+> langchain_openai: 0.3.34
+> langchain_text_splitters: 1.1.1
+> langgraph_sdk: 0.3.13","chatopenai.withstructuredoutput(..., method jsonschema ).stream() drops response headers x-request-id in responsemetadata submission checklist - x this is a bug, not a usage question. - x i added a clear and descriptive title that summarizes this issue. - x i used the github search to find a similar question and didn't find it. - x i am sure that this is a bug in langchain rather than my code. - x the bug is not resolved by updating to the latest stable version of langchain (or the specific integration package). - x this is not related to the langchain-community package. - x i posted a self-contained, minimal, reproducible example. a maintainer can copy it and run it as is. package (required) - x langchain - x langchain-openai - langchain-anthropic - langchain-classic - x langchain-core - langchain-model-profiles - langchain-tests - langchain-text-splitters - langchain-chroma - langchain-deepseek - langchain-exa - langchain-fireworks - langchain-groq - langchain-huggingface - langchain-mistralai - langchain-nomic - langchain-ollama - langchain-openrouter - langchain-perplexity - langchain-qdrant - langchain-xai - other not sure general related issues prs no response reproduction steps example code (python) error message and stack trace (if applicable) description hi team, we re seeing inconsistent response header propagation when using langchain structured output streaming with openai models. summary when using: the streamed aimessagechunk final message objects do not contain http response headers (specifically x-request-id) inside responsemetadata. however, the same observability flow works correctly for: non-structured streaming azurechatopenai structured streaming regular create(stream true, includeresponseheaders true) paths this makes it difficult to correlate streamed requests with provider-side logs incidents. system info package information ------------------- langchaincore: 1.2.29 langchain: 1.2.15 langchaincommunity: 0.4.1 langsmith: 0.3.45 langchainaws: 1.4.3 langchainclassic: 1.0.3 langchaingooglegenai: 4.2.1 langchaingooglevertexai: 2.1.2 langchainopenai: 0.3.34 langchaintextsplitters: 1.1.1 langgraph_sdk: 0.3.13",open,2026-05-14 09:23:03+00:00,,,,"bug, core, langchain, openai, external",37421,1
+comment_4451916288,comment,behlole,Hi maintainers — I have a fix prepared for this. Could one of you assign me so the PR can be reopened? (Previous attempt: #37428.),hi maintainers i have a fix prepared for this. could one of you assign me so the pr can be reopened? (previous attempt: 37428.),open,2026-05-14 15:05:32+00:00,,issue_37421,prasodani,,37421,0
+issue_37420,issue,imsalik,"stream_events(version=""v3""): reasoning content dropped from AIMessage when message also contains a tool_call ### Submission checklist
+
+- [x] This is a bug, not a usage question.
+- [x] I added a clear and descriptive title that summarizes this issue.
+- [x] I used the GitHub search to find a similar question and didn't find it.
+- [x] I am sure that this is a bug in LangChain rather than my code.
+- [x] The bug is not resolved by updating to the latest stable version of LangChain (or the specific integration package).
+- [x] This is not related to the langchain-community package.
+- [x] I posted a self-contained, minimal, reproducible example. A maintainer can copy it and run it AS IS.
+
+### Package (Required)
+
+- [x] langchain
+- [ ] langchain-openai
+- [ ] langchain-anthropic
+- [ ] langchain-classic
+- [x] langchain-core
+- [ ] langchain-model-profiles
+- [ ] langchain-tests
+- [ ] langchain-text-splitters
+- [ ] langchain-chroma
+- [ ] langchain-deepseek
+- [ ] langchain-exa
+- [ ] langchain-fireworks
+- [ ] langchain-groq
+- [ ] langchain-huggingface
+- [ ] langchain-mistralai
+- [ ] langchain-nomic
+- [ ] langchain-ollama
+- [ ] langchain-openrouter
+- [ ] langchain-perplexity
+- [ ] langchain-qdrant
+- [ ] langchain-xai
+- [x] Other / not sure / general
+
+### Related Issues / PRs
+
+_No response_
+
+### Reproduction Steps / Example Code (Python)
+
+```python
+import asyncio
+from langchain.agents import create_agent
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.tools import tool
+from langchain_core.messages import AIMessage
+
+
+@tool
+def get_weather(city: str) -> str:
+    """"""Get the weather for a city.""""""
+    return f""Sunny in {city}""
+
+
+async def main():
+    llm = ChatGoogleGenerativeAI(
+        model=""gemini-2.5-pro"",
+        thinking_budget=2048,
+        include_thoughts=True,
+    )
+    agent = create_agent(llm, [get_weather])
+
+    run = await agent.astream_events(
+        {""messages"": [{""role"": ""user"",
+                       ""content"": ""What is the weather in San Francisco?""}]},
+        version=""v3"",
+    )
+
+    print(""============ STREAM ============"")
+    async for chat_stream in run.messages:
+        print(""\n--- streamed AIMessage ---"")
+        print(""[reasoning] "", end="""", flush=True)
+        async for chunk in chat_stream.reasoning:
+            print(chunk, end="""", flush=True)
+        print(""\n[text] "", end="""", flush=True)
+        async for chunk in chat_stream.text:
+            print(chunk, end="""", flush=True)
+        print()
+
+    final = await run.output()
+    print(""\n\n============ final state ============"")
+    for m in final[""messages""]:
+        if isinstance(m, AIMessage):
+            print(""\n--- AIMessage ---"")
+            print(""content:   "", m.content)
+            print(""tool_calls:"", m.tool_calls)
+
+
+asyncio.run(main())
+```
+
+### Error Message and Stack Trace (if applicable)
+
+```shell
+============ STREAM ============
+
+--- streamed AIMessage #1 ---
+[reasoning] **Querying the Weather**
+
+I'm zeroing in on the task at hand. The user wants San Francisco's weather. I've pinpointed the `get_weather` tool as the solution. Now, I'm just formulating the correct tool call. Specifically, I'm setting the `city` parameter to ""San Francisco"" and will wrap the tool call in a `print` statement.
+
+
+**Formulating the Code**
+
+I'm solidifying the final code block. I've got the `get_weather` tool call prepared and the city parameter set. The next step is to neatly package this tool call within the `print` function. Then, I'll ensure it's accurately embedded within the `tool_code` block before submitting the response.
+
+
+
+[text]
+
+--- streamed AIMessage #2 ---
+[reasoning]
+[text] Sunny in San Francisco
+
+--- streamed AIMessage #3 ---
+[reasoning]
+[text] The weather in San Francisco is sunny.
+
+
+
+============ final state ============
+
+--- AIMessage ---
+content:    [{'type': 'tool_call', 'id': '6d665264-4fd0-46a3-889e-f04e47548ed0', 'name': 'get_weather', 'args': {'city': 'San Francisco'}}]
+tool_calls: [{'name': 'get_weather', 'args': {'city': 'San Francisco'}, 'id': '6d665264-4fd0-46a3-889e-f04e47548ed0', 'type': 'tool_call'}] **<--- Missing reasoning**
+
+--- AIMessage ---
+content:    [{'type': 'text', 'text': 'The weather in San Francisco is sunny.\n', 'index': 0}]
+tool_calls: []
+```
+
+### Description
+
+I'm running a create_agent with Gemini (thinking enabled) and a tool, then streaming the run via astream_events(version=""v3""). The model's reasoning streams perfectly during the run — ChatModelStream.reasoning emits the full thinking text live.
+
+**Expected**: when the agent's tool-calling step finishes, the persisted AIMessage in the final graph state preserves both the reasoning block and the tool_call in content, the same way ainvoke() does on the same model.
+
+**Actual**: the persisted AIMessage has content = [{type: tool_call, ...}] — the reasoning that streamed through .reasoning is silently dropped. It's not in content, not in additional_kwargs, not in response_metadata. The next AIMessage in the run (text-only respons","streamevents(version v3 ): reasoning content dropped from aimessage when message also contains a toolcall submission checklist - x this is a bug, not a usage question. - x i added a clear and descriptive title that summarizes this issue. - x i used the github search to find a similar question and didn't find it. - x i am sure that this is a bug in langchain rather than my code. - x the bug is not resolved by updating to the latest stable version of langchain (or the specific integration package). - x this is not related to the langchain-community package. - x i posted a self-contained, minimal, reproducible example. a maintainer can copy it and run it as is. package (required) - x langchain - langchain-openai - langchain-anthropic - langchain-classic - x langchain-core - langchain-model-profiles - langchain-tests - langchain-text-splitters - langchain-chroma - langchain-deepseek - langchain-exa - langchain-fireworks - langchain-groq - langchain-huggingface - langchain-mistralai - langchain-nomic - langchain-ollama - langchain-openrouter - langchain-perplexity - langchain-qdrant - langchain-xai - x other not sure general related issues prs no response reproduction steps example code (python) error message and stack trace (if applicable) description i'm running a createagent with gemini (thinking enabled) and a tool, then streaming the run via astreamevents(version v3 ). the model's reasoning streams perfectly during the run chatmodelstream.reasoning emits the full thinking text live. expected: when the agent's tool-calling step finishes, the persisted aimessage in the final graph state preserves both the reasoning block and the toolcall in content, the same way ainvoke() does on the same model. actual: the persisted aimessage has content type: toolcall, ... the reasoning that streamed through .reasoning is silently dropped. it's not in content, not in additionalkwargs, not in responsemetadata. the next aimessage in the run (text-only response after the tool result) is unaffected; only aimessages that contain a toolcall lose their reasoning. system info os: linux, python 3.12.9 langchaincore: 1.4.0 langchain: 1.3.0 langchaingooglegenai: 4.2.2 langgraph: 1.2.0",open,2026-05-14 06:18:12+00:00,,,,"bug, core, langchain, external",37420,2
+comment_4448185629,comment,imsalik,"Looks ike the issue may be in `langchain_core/language_models/chat_model_stream.py`, _ChatModelStreamBase._finish: it runs _sweep_chunk_store for _tool_call_chunks and _server_tool_call_chunks to backfill blocks that didn't receive an explicit content-block-finish before message-finish, but no equivalent sweep exists for _reasoning_per_block / _text_per_block. Gemini emits content-block-delta events for reasoning but doesn't always emit a per-block content-block-finish before the next block opens, so the accumulated reasoning never lands in self._blocks and _assemble_message builds content without it.","looks ike the issue may be in , chatmodelstreambase.finish: it runs sweepchunkstore for toolcallchunks and servertoolcallchunks to backfill blocks that didn't receive an explicit content-block-finish before message-finish, but no equivalent sweep exists for reasoningperblock textperblock. gemini emits content-block-delta events for reasoning but doesn't always emit a per-block content-block-finish before the next block opens, so the accumulated reasoning never lands in self.blocks and assemble_message builds content without it.",open,2026-05-14 06:23:42+00:00,,issue_37420,imsalik,,37420,0
+comment_4448468290,comment,jackjin1997,"Thanks for the thorough root-cause write-up — confirms the missing parallel between _tool_call_chunks/_server_tool_call_chunks sweep and reasoning/text per-block accumulators in `_ChatModelStreamBase._finish`. The asymmetry is the exact kind of thing that's easy to miss when a provider (Gemini here) is loose about emitting content-block-finish before the next block opens.
+
+I've been working on the related reasoning_content drop on the request side for ChatDeepSeek (#37390 / langchainjs #10883). This one is a sibling problem on the streaming/assembly path. Happy to take this on — could a maintainer assign it? @ccurme @mdrxy",thanks for the thorough root-cause write-up confirms the missing parallel between toolcallchunks servertoolcallchunks sweep and reasoning text per-block accumulators in . the asymmetry is the exact kind of thing that's easy to miss when a provider (gemini here) is loose about emitting content-block-finish before the next block opens. i've been working on the related reasoningcontent drop on the request side for chatdeepseek ( 37390 langchainjs 10883). this one is a sibling problem on the streaming assembly path. happy to take this on could a maintainer assign it?,open,2026-05-14 07:04:19+00:00,,issue_37420,imsalik,,37420,0
+issue_37419,issue,imsalik,"stream_events(version=""v3""): reasoning content dropped from AIMessage when same message contains a tool_call ### Submission checklist
+
+- [x] This is a bug, not a usage question.
+- [x] I added a clear and descriptive title that summarizes this issue.
+- [x] I used the GitHub search to find a similar question and didn't find it.
+- [x] I am sure that this is a bug in LangChain rather than my code.
+- [x] The bug is not resolved by updating to the latest stable version (langchain-core 1.4.0, langchain 1.3.0).
+- [x] This is not related to the langchain-community package.
+- [x] I posted a self-contained, minimal, reproducible example.
+
+### Package
+
+`langchain-core`
+
+### Reproduction Steps / Example Code (Python)
+
+```python
+""""""Reasoning text streamed via the v3 protocol is lost from the assembled
+AIMessage when the same message also contains a tool_call.
+
+_finish() backfills unfinished tool_call_chunks into _blocks via
+_sweep_chunk_store, but does no equivalent sweep for unfinished reasoning
+blocks. Any reasoning that didn't receive an explicit content-block-finish
+before message-finish is silently dropped from message.content — even
+though it remains visible during the run via the .reasoning projection.
+""""""
+
+from langchain_core.language_models.chat_model_stream import ChatModelStream
+
+s = ChatModelStream()
+s.dispatch({\""event\"": \""message-start\"", \""role\"": \""ai\"", \""id\"": \""msg-1\""})
+
+# Reasoning block: opens, streams a delta, but NEVER gets content-block-finish.
+# (This is the shape Gemini emits when a tool call immediately follows reasoning
+# in the same response.)
+s.dispatch({
+    \""event\"": \""content-block-start\"",
+    \""index\"": 0,
+    \""content\"": {\""type\"": \""reasoning\"", \""id\"": \""r-1\""},
+})
+s.dispatch({
+    \""event\"": \""content-block-delta\"",
+    \""index\"": 0,
+    \""delta\"": {\""type\"": \""reasoning-delta\"",
+              \""reasoning\"": \""I should call the schema tool.\""},
+})
+
+# Tool-call block: opens, streams args, finishes normally.
+s.dispatch({
+    \""event\"": \""content-block-start\"",
+    \""index\"": 1,
+    \""content\"": {\""type\"": \""tool_call_chunk\"", \""id\"": \""tc-1\"", \""name\"": \""get_schema\""},
+})
+s.dispatch({
+    \""event\"": \""content-block-delta\"",
+    \""index\"": 1,
+    \""delta\"": {\""type\"": \""block-delta\"",
+              \""fields\"": {\""type\"": \""tool_call_chunk\"", \""args\"": '{\""q\"": \""x\""}'}},
+})
+s.dispatch({
+    \""event\"": \""content-block-finish\"",
+    \""index\"": 1,
+    \""content\"": {\""type\"": \""tool_call\"", \""id\"": \""tc-1\"",
+                \""name\"": \""get_schema\"", \""args\"": {\""q\"": \""x\""}},
+})
+
+s.dispatch({\""event\"": \""message-finish\""})
+
+msg = s.output_message
+print(\""content:             \"", msg.content)
+print(\""reasoning projection:\"", str(s.reasoning))
+# content:              [{'type': 'tool_call', ...}]            <- reasoning missing
+# reasoning projection: I should call the schema tool.          <- but it's in here
+```
+
+### Error Message and Stack Trace (if applicable)
+
+No exception — silent data loss.
+
+### Description
+
+When using \`stream_events(version=\""v3\"")\` / \`astream_events(version=\""v3\"")\` with a model that emits a **reasoning** block followed by a **tool_call** in the same message (e.g. Gemini 2.5 / 3.x with thinking enabled), the reasoning text is dropped from the assembled \`AIMessage.content\`. The streamed \`.reasoning\` projection still exposes the text during the run, but the persisted message — what's returned from the node, fed into the checkpointer, and shown on conversation read-back — has the reasoning gone.
+
+**Expected:** \`msg.content\` contains both the reasoning block and the tool_call block, mirroring what's available via the \`.reasoning\` and \`.tool_calls\` projections during streaming. Persisting a tool-calling assistant turn should not lose its reasoning.
+
+**Actual:** \`msg.content\` contains only the tool_call. The reasoning is unrecoverable from the saved message — it is not in \`additional_kwargs\`, not in \`response_metadata\`, and \`.content_blocks\` reconstructs the same single-element list.
+
+**Root cause** (\`langchain_core/language_models/chat_model_stream.py\`, \`_finish\`): the method backfills any \`tool_call_chunks\` that didn't receive an explicit \`content-block-finish\` before \`message-finish\`:
+
+\`\`\`python
+_sweep_chunk_store(self._tool_call_chunks, ...)
+_sweep_chunk_store(self._server_tool_call_chunks, ...)
+\`\`\`
+
+There is no equivalent sweep for \`_reasoning_per_block\` (or \`_text_per_block\`). When a provider emits \`content-block-delta\` events for reasoning but no terminating \`content-block-finish\` before the next block or message-finish, the accumulated reasoning never lands in \`self._blocks\`, so \`_assemble_message\` builds \`content\` without it.
+
+**Suggested fix:** after the existing tool-call sweeps in \`_finish\`, synthesize a finalized \`ReasoningContentBlock\` (and \`TextContentBlock\`) into \`self._blocks\` for any index present in \`_reasoning_per_block\` / \`_text_per_block\` that isn't already in \`self._blocks\`. This ","streamevents(version v3 ): reasoning content dropped from aimessage when same message contains a toolcall submission checklist - x this is a bug, not a usage question. - x i added a clear and descriptive title that summarizes this issue. - x i used the github search to find a similar question and didn't find it. - x i am sure that this is a bug in langchain rather than my code. - x the bug is not resolved by updating to the latest stable version (langchain-core 1.4.0, langchain 1.3.0). - x this is not related to the langchain-community package. - x i posted a self-contained, minimal, reproducible example. package reproduction steps example code (python) error message and stack trace (if applicable) no exception silent data loss. description when using with a model that emits a reasoning block followed by a toolcall in the same message (e.g. gemini 2.5 3.x with thinking enabled), the reasoning text is dropped from the assembled . the streamed projection still exposes the text during the run, but the persisted message what's returned from the node, fed into the checkpointer, and shown on conversation read-back has the reasoning gone. expected: contains both the reasoning block and the toolcall block, mirroring what's available via the and projections during streaming. persisting a tool-calling assistant turn should not lose its reasoning. actual: contains only the toolcall. the reasoning is unrecoverable from the saved message it is not in , not in , and reconstructs the same single-element list. root cause ( , ): the method backfills any that didn't receive an explicit before : there is no equivalent sweep for (or ). when a provider emits events for reasoning but no terminating before the next block or message-finish, the accumulated reasoning never lands in , so builds without it. suggested fix: after the existing tool-call sweeps in , synthesize a finalized (and ) into for any index present in that isn't already in . this mirrors the tool-call sweep and keeps complete regardless of whether the provider emits a per-block . practical impact (gemini agents): any tool-calling turn's thinking is lost from conversation history. live sse rendering still works ( projection); only the persisted replayed transcript is affected. system info",closed,2026-05-14 05:55:01+00:00,2026-05-14 05:55:14+00:00,,,external,37419,1
+issue_37410,issue,bmd1905,"[Feature] Eager tool dispatch middleware — overlap tool execution with model streaming ### Submission checklist
+
+- [x] This is a feature request, not a bug report or usage question.
+- [x] I added a clear and descriptive title that summarizes the feature request.
+- [x] I used the GitHub search to find a similar feature request and didn't find it.
+- [x] I checked the LangChain documentation and API reference to see if this feature already exists.
+- [x] This is not related to the langchain-community package.
+
+### Package
+
+- `langchain` (specifically `langchain.agents.create_agent` + the middleware system)
+
+### Feature Description
+
+Proposal: a built-in middleware (or option on `create_agent`) for **eager tool dispatch** — firing each tool the moment its `tool_use` block finishes streaming, while the rest of the assistant response is still being generated. This is strictly faster than today's parallel tool calling (which waits for the full response before firing any tool) and produces identical model outputs.
+
+We've built and open-sourced a reference implementation as a LangGraph middleware: [`eager_middleware`](https://github.com/cloudthinker-ai/eager-tools/tree/main/packages/eager-tools-langgraph). It drops into the existing `create_agent` API with one line:
+
+```python
+from langchain.agents import create_agent
+from langchain_anthropic import ChatAnthropic
+from eager_tools_langgraph import eager_middleware
+
+agent = create_agent(
+    model=ChatAnthropic(model_name=""claude-sonnet-4-5""),
+    tools=[get_weather, get_stock_price, get_news],
+    middleware=[eager_middleware(eager_tools)],
+)
+```
+
+Same `Tool` definitions, same prompt, same model outputs — only the dispatch timing changes.
+
+### Use Case
+
+Today, `create_agent` already runs a single assistant message's tool calls in parallel — that moves the tool phase from sum-of-durations to max-of-durations. But the stream still has to finish before the tool phase begins. For agents with multi-second tool calls (HTTP fetches, DB queries, RAG, vector search, etc.), the model's stream and the tool execution are sequential, even though they could overlap.
+
+With eager dispatch, wall clock becomes `max(stream, max(tool))` instead of `stream + max(tool)`.
+
+Numbers:
+- Synthetic harness (16 workloads, 3–15 tools, deterministic): **1.20×–1.50×** over parallel dispatch, median ~1.28×
+- CloudThinker production (real workloads with provider jitter): **~50% median latency cut**
+
+Full benchmark: https://github.com/cloudthinker-ai/eager-tools/blob/main/bench/results.md
+
+This pattern is most valuable for users running agents with sub-second-to-multi-second tools — which describes most production agents today.
+
+### Proposed Solution
+
+A middleware that:
+1. Adapts the model's streaming response (Anthropic + OpenAI today; extensible)
+2. Detects per-block seal events (a new `tool_call_id` in the stream signals the previous block is complete)
+3. Dispatches the completed tool to an executor pool while the stream continues
+4. Surfaces results back to the agent loop without changing the existing `Tool` contract
+
+Our OSS implementation already exposes the seal mechanism, a `gate` callable for non-idempotent tools (HITL), and `Tool.idempotent` for blanket safety. Full mechanism doc: https://github.com/cloudthinker-ai/eager-tools/blob/main/METHOD.md
+
+If the team is open to it, we'd be happy to:
+- Contribute the middleware (or a stripped-down core) upstream
+- Iterate on the contract to match the official middleware patterns
+- Co-author docs / examples
+
+### Alternatives Considered
+
+- **Today's parallel tool calling:** already provided by `create_agent`. Eager dispatch is an *additive* improvement on top of it — not a replacement.
+- **Manual streaming + tool dispatch:** users can implement this themselves by parsing the raw stream, but it requires forking the runner. A middleware keeps it transparent.
+- **Out-of-band tool prefetch via prompt hints:** brittle, not generalizable.
+
+### Additional Context
+
+- Blog post with the full production story: https://cloudthinker.io/blogs/eager-tool-calling-50-percent-faster-agents
+- Repo (MIT): https://github.com/cloudthinker-ai/eager-tools
+- ""When NOT to use it"" doc (sub-50ms tools, sequentially dependent tools, non-idempotent tools, non-streaming backends): https://github.com/cloudthinker-ai/eager-tools/blob/main/docs/when-not-to-use.md
+
+Happy to open a draft PR or RFC if the team is open to discussing an upstream path. Thanks for everything you build!","feature eager tool dispatch middleware overlap tool execution with model streaming submission checklist - x this is a feature request, not a bug report or usage question. - x i added a clear and descriptive title that summarizes the feature request. - x i used the github search to find a similar feature request and didn't find it. - x i checked the langchain documentation and api reference to see if this feature already exists. - x this is not related to the langchain-community package. package - (specifically the middleware system) feature description proposal: a built-in middleware (or option on ) for eager tool dispatch firing each tool the moment its block finishes streaming, while the rest of the assistant response is still being generated. this is strictly faster than today's parallel tool calling (which waits for the full response before firing any tool) and produces identical model outputs. we've built and open-sourced a reference implementation as a langgraph middleware: ( it drops into the existing api with one line: same definitions, same prompt, same model outputs only the dispatch timing changes. use case today, already runs a single assistant message's tool calls in parallel that moves the tool phase from sum-of-durations to max-of-durations. but the stream still has to finish before the tool phase begins. for agents with multi-second tool calls (http fetches, db queries, rag, vector search, etc.), the model's stream and the tool execution are sequential, even though they could overlap. with eager dispatch, wall clock becomes instead of . numbers: - synthetic harness (16 workloads, 3 15 tools, deterministic): 1.20 1.50 over parallel dispatch, median 1.28 - cloudthinker production (real workloads with provider jitter): 50 median latency cut full benchmark: this pattern is most valuable for users running agents with sub-second-to-multi-second tools which describes most production agents today. proposed solution a middleware that: 1. adapts the model's streaming response (anthropic openai today; extensible) 2. detects per-block seal events (a new in the stream signals the previous block is complete) 3. dispatches the completed tool to an executor pool while the stream continues 4. surfaces results back to the agent loop without changing the existing contract our oss implementation already exposes the seal mechanism, a callable for non-idempotent tools (hitl), and for blanket safety. full mechanism doc: if the team is open to it, we'd be happy to: - contribute the middleware (or a stripped-down core) upstream - iterate on the contract to match the official middleware patterns - co-author docs examples alternatives considered - today's parallel tool calling: already provided by . eager dispatch is an additive improvement on top of it not a replacement. - manual streaming tool dispatch: users can implement this themselves by parsing the raw stream, but it requires forking the runner. a middleware keeps it transparent. - out-of-band tool prefetch via prompt hints: brittle, not generalizable. additional context - blog post with the full production story: - repo (mit): - when not to use it doc (sub-50ms tools, sequentially dependent tools, non-idempotent tools, non-streaming backends): happy to open a draft pr or rfc if the team is open to discussing an upstream path. thanks for everything you build!",closed,2026-05-14 03:47:01+00:00,2026-05-14 03:47:12+00:00,,,external,37410,1

@@ -1,0 +1,15 @@
+COSC 2671 — Assignment 2 — Group 17
+Access Details
+
+Student: John Robyn De Guzman s3944714
+Student: Phavan Kuumar Janakiraman Suresh s4190557
+
+GitHub Repository:
+  URL: https://github.com/s3944714/SMNA2026-A2-github-networks
+  Visibility: Public
+
+All code, notebooks, and outputs are available at the
+repository above. To run the notebooks:
+  1. Clone the repository
+  2. Create a .env file with a valid GITHUB_TOKEN
+  3. Follow the run order in README.md

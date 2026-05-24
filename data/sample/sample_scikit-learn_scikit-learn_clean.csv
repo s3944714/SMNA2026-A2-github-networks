@@ -1,0 +1,169 @@
+id,type,author,text,clean_text,state,created_at,closed_at,parent_id,parent_author,labels,issue_number,comment_count
+issue_34006,issue,ogrisel,"RFC/META Harden CI security > [!WARNING]
+> This issue is not yet ready for a PR. If you are interested in contributing to scikit-learn, please have a look at our [contributing guidelines](https://scikit-learn.org/dev/developers/contributing.html), and in particular the sections for [new contributors](https://scikit-learn.org/dev/developers/contributing.html#new-contributors) and the [""Needs triage""](https://scikit-learn.org/dev/developers/contributing.html#issues-tagged-needs-triage) label.
+
+Because of the ongoing Mini Shai Hulud attack against CI & OSS supply chain (see [Postmortem: TanStack npm supply-chain compromise](https://tanstack.com/blog/npm-supply-chain-compromise-postmortem) for details), I think we should review and possibly straighten our CI before releasing 1.9.
+
+In particular, we use the unsafe `pull_request_target` in several workflows which is a documented attack vector of the Mini Shai-Hulud worm that currently still spreads by corrupting an increasing number of npm and pypi packages.
+
+## Short term:
+
+- Regularly check that the dates of https://pypi.org/project/scikit-learn/#files match our manually triggered release dates (this seems to be the case as of today 2026-05-13)
+- Review our `publish_pypi.yml` and `wheels.yml` workflows to make sure it is not subject by cache poisoning attacks (from a cursory glance it does not think we use any build cache, but we should double-check).
+- Review findings reported by `zizmor .github/workflows/publish_pypi.yml` and `zizmor .github/workflows/wheels.yml`.
+- Assess if workflows that use `pull_request_target` can have a side effect on our release process.
+  - Note: I asked the following to Claude: https://claude.ai/share/c6aea06a-a9dc-4e55-b5f4-830254166994 (TL;DNR it isn't too worried, but we should probably spend more time reading this analysis in more details).
+- Unzip and review the contents of the generated wheel files in the release branch prior to uploading to look for unexpected payload.
+  - EDIT: I asked Claude (same conversation as the one linked above) to do that on the latest nightly wheel and it did not find anything fishy.
+
+## Medium/Long term
+
+- Hash-pin all github actions used in the `publish_pypi.yml` and `wheels.yml` workflows.
+- Use relative dependency cooldown for GitHub Actions updates via dependabot:
+  - https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference?versionId=free-pro-team%40latest&productId=code-security&restPage=tutorials%2Csecure-your-dependencies%2Cautomating-dependabot-with-github-actions#cooldown-
+- Find ways to avoid the use of `pull_request_target` in our regular dev CI.
+- Address any remaining ""findings"" reported by running `zizmor .` in our repo (currently `191 findings (73 suppressed, 32 fixable): 4 informational, 26 low, 1 medium, 87 high`, many of which are related to `pull_request_target` and unpinned action references).
+- Use relative dependency cooldowns when generating lock files as soon as implemented in mamba and conda-lock:
+  - https://github.com/conda/conda-lock/issues/908
+  - https://github.com/mamba-org/mamba/pull/4228
+- Isolate the release process in a dedicated repo with a easy to audit, limited number of config files/action logs/user permissions, see:
+  - https://github.com/numpy/numpy/issues/29178
+  - https://github.com/numpy/numpy-release
+  - https://github.com/scipy/scipy-release
+
+
+I labeled this PR as block as I think we should at least do the short terms items prior to releasing.
+
+We can probably create sub-issues for things we agree are good ideas.","rfc meta harden ci security !warning this issue is not yet ready for a pr. if you are interested in contributing to scikit-learn, please have a look at our contributing guidelines ( and in particular the sections for new contributors ( and the needs triage ( label. because of the ongoing mini shai hulud attack against ci oss supply chain (see , i think we should review and possibly straighten our ci before releasing 1.9. in particular, we use the unsafe in several workflows which is a documented attack vector of the mini shai-hulud worm that currently still spreads by corrupting an increasing number of npm and pypi packages. short term: - regularly check that the dates of match our manually triggered release dates (this seems to be the case as of today 2026-05-13) - review our and workflows to make sure it is not subject by cache poisoning attacks (from a cursory glance it does not think we use any build cache, but we should double-check). - review findings reported by and . - assess if workflows that use can have a side effect on our release process. - note: i asked the following to claude: (tl;dnr it isn't too worried, but we should probably spend more time reading this analysis in more details). - unzip and review the contents of the generated wheel files in the release branch prior to uploading to look for unexpected payload. - edit: i asked claude (same conversation as the one linked above) to do that on the latest nightly wheel and it did not find anything fishy. medium long term - hash-pin all github actions used in the and workflows. - use relative dependency cooldown for github actions updates via dependabot: - - find ways to avoid the use of in our regular dev ci. - address any remaining findings reported by running in our repo (currently , many of which are related to and unpinned action references). - use relative dependency cooldowns when generating lock files as soon as implemented in mamba and conda-lock: - - - isolate the release process in a dedicated repo with a easy to audit, limited number of config files action logs user permissions, see: - - - i labeled this pr as block as i think we should at least do the short terms items prior to releasing. we can probably create sub-issues for things we agree are good ideas.",open,2026-05-13 09:22:00+00:00,,,,Blocker,34006,7
+comment_4440264508,comment,agriyakhetarpal,"I believe y'all will be fine using `pull_request_target` as long as it doesn't check out any user code using `actions/checkout` and permissions for a specific job are scoped down to only what it needs.
+
+Another good thing to do here is to hash-pin all refs in pre-commit hooks; they currently aren't so: https://github.com/scikit-learn/scikit-learn/blob/ab6f86c1086377c19754177e0f46eb26e6282be5/.pre-commit-config.yaml. Zizmor may gain functionality to audit this in the future: https://github.com/zizmorcore/zizmor/issues/1799, but for now, either `pre-commit autoupdate --freeze` or `prek autoupdate --freeze` will do it.
+
+Other things to check/do:
+- separating the build and publish jobs that only communicate via wheel artifact download/uploads, such that permissions for minting an OIDC token do not leak over to any wheel build (or in this case, downloading wheels from Anaconda staging) steps. Zizmor may gain this, too, at some point: https://github.com/zizmorcore/zizmor/issues/1968
+- publishing attestations alongside built wheels, via https://github.com/actions/attest-build-provenance, which will then land at https://github.com/scikit-learn/scikit-learn/attestations and can be used to verify the provenance of the wheels
+
+There are also various useful recommendations to check out in this blog, in case you may have not come across it already (it goes quite a bit further about `pull_request_target`, for example): https://astral.sh/blog/open-source-security-at-astral.","i believe y'all will be fine using as long as it doesn't check out any user code using and permissions for a specific job are scoped down to only what it needs. another good thing to do here is to hash-pin all refs in pre-commit hooks; they currently aren't so: zizmor may gain functionality to audit this in the future: but for now, either or will do it. other things to check do: - separating the build and publish jobs that only communicate via wheel artifact download uploads, such that permissions for minting an oidc token do not leak over to any wheel build (or in this case, downloading wheels from anaconda staging) steps. zizmor may gain this, too, at some point: - publishing attestations alongside built wheels, via which will then land at and can be used to verify the provenance of the wheels there are also various useful recommendations to check out in this blog, in case you may have not come across it already (it goes quite a bit further about , for example):",open,2026-05-13 11:05:30+00:00,,issue_34006,ogrisel,,34006,0
+comment_4440792129,comment,AnneBeyer,"I can create a PR for hash-pinning the actions, unless you're already working on that, @ogrisel?","i can create a pr for hash-pinning the actions, unless you're already working on that, ?",open,2026-05-13 12:08:45+00:00,,issue_34006,ogrisel,,34006,0
+comment_4441072259,comment,betatim,"@AnneBeyer I have a vague memory of us discussing the topic of using hash'es for GitHub actions before. However I can't find it in the issues :( My memory of it is that we discussed if we need/should pin all actions to hashes or if some can be left pinned to a specific version (e.g. those maintained by GitHub). I think the argument for not going ""maximum pinning"" was that it makes it more difficult to update things (potentially dependabot stops working) and that would not be great. https://github.com/scikit-learn/scikit-learn/blob/main/.github/dependabot.yml has a comment similar to this in it. Maybe something to fact check given that it is now 2 years later. (Maybe it is time to re-read SPEC8 and/or update its advice as well?)",i have a vague memory of us discussing the topic of using hash'es for github actions before. however i can't find it in the issues :( my memory of it is that we discussed if we need should pin all actions to hashes or if some can be left pinned to a specific version (e.g. those maintained by github). i think the argument for not going maximum pinning was that it makes it more difficult to update things (potentially dependabot stops working) and that would not be great. has a comment similar to this in it. maybe something to fact check given that it is now 2 years later. (maybe it is time to re-read spec8 and or update its advice as well?),open,2026-05-13 12:41:39+00:00,,issue_34006,ogrisel,,34006,0
+comment_4441110618,comment,betatim,"Agriya mentioned that we should also look at pre-commit pinning, which made me wonder: should we think about our other CI as well? 
+
+Now that someone mentioned it, using pre-commit makes me super nervous :D We are basically forcing software on every contributor and updating it for them. At least I don't know if/when/how pre-commit updates things and how I could stop it from doing that/ask for my permission.","agriya mentioned that we should also look at pre-commit pinning, which made me wonder: should we think about our other ci as well? now that someone mentioned it, using pre-commit makes me super nervous :d we are basically forcing software on every contributor and updating it for them. at least i don't know if when how pre-commit updates things and how i could stop it from doing that ask for my permission.",open,2026-05-13 12:45:38+00:00,,issue_34006,ogrisel,,34006,0
+comment_4441383869,comment,AnneBeyer,"> I think the argument for not going ""maximum pinning"" was that it makes it more difficult to update things (potentially dependabot stops working) and that would not be great. 
+
+From the last [dependabot update PR](https://github.com/scikit-learn/scikit-learn/pull/33917/changes) it looks like it is able to handle both types, but the dependabot repo does have a few open issues on the [consistency of hash and version comment](https://github.com/dependabot/dependabot-core/issues/8011) in some updates.","i think the argument for not going maximum pinning was that it makes it more difficult to update things (potentially dependabot stops working) and that would not be great. from the last dependabot update pr ( it looks like it is able to handle both types, but the dependabot repo does have a few open issues on the consistency of hash and version comment ( in some updates.",open,2026-05-13 13:16:43+00:00,,issue_34006,ogrisel,,34006,0
+comment_4441937690,comment,ogrisel,"From what I recall, I think we stated we wanted to use SHA pinning on sensitive workflows such as `publish_pypi.yml`. We might want to do the same for `wheels.yml` and also configure a 7D cooldown.","from what i recall, i think we stated we wanted to use sha pinning on sensitive workflows such as . we might want to do the same for and also configure a 7d cooldown.",open,2026-05-13 14:17:47+00:00,,issue_34006,ogrisel,,34006,0
+comment_4441954517,comment,ogrisel,The version comment bug is annoying but not critical.,the version comment bug is annoying but not critical.,open,2026-05-13 14:19:27+00:00,,issue_34006,ogrisel,,34006,0
+issue_34005,issue,tomMoral,"Using dask distributed with a pipeline and column_transformer breaks metadata routing > [!WARNING]
+> This issue is not yet ready for a PR. If you are interested in contributing to scikit-learn, please have a look at our [contributing guidelines](https://scikit-learn.org/dev/developers/contributing.html), and in particular the sections for [new contributors](https://scikit-learn.org/dev/developers/contributing.html#new-contributors) and the [""Needs triage""](https://scikit-learn.org/dev/developers/contributing.html#issues-tagged-needs-triage) label.
+
+### Describe the bug and give evidence about its user-facing impact
+
+when using a pipeline with a columns transformer, using the pipeline in a distributed environment seems to raise a strange error.
+
+### Steps/Code to Reproduce
+
+```python
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.compose import make_column_transformer
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import StandardScaler, QuantileTransformer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score
+
+X, y = make_classification()
+
+pipeline = make_pipeline(
+    make_column_transformer(
+        (StandardScaler(), [0]),
+    ),
+    # StandardScaler(),
+    RandomForestClassifier(
+        max_depth=7, n_estimators=300, random_state=42
+    )
+)
+pipeline
+
+cv_results = cross_val_score(pipeline, X, y, cv=5, n_jobs=1)
+print(""CV score:"", np.mean(cv_results))
+
+from distributed import Client
+from joblib import parallel_config
+
+client = Client()
+
+with parallel_config(""dask""):
+    cv_scores = cross_val_score(pipeline, X, y, cv=5, n_jobs=-1)
+
+print(""CV score:"", np.mean(cv_scores))
+client.close()
+```
+
+### Expected Results
+
+CV score: 0.8300000000000001
+CV score: 0.8300000000000001
+
+### Actual Results
+
+CV score: 0.8300000000000001
+  warnings.warn(
+/home/tom/Work/prog/scikit-learn/sklearn/model_selection/_validation.py:944: UserWarning: Scoring failed. The score on this train-test partition for these parameters will be set to nan. Details: 
+joblib.externals.loky.process_executor._RemoteTraceback: 
+""""""
+Traceback (most recent call last):
+  File ""/home/tom/Work/prog/joblib/joblib/_utils.py"", line 109, in __call__
+    return self.func(**kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/joblib/joblib/_dask.py"", line 128, in __call__
+    results.append(func(*args, **kwargs))
+                   ^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/utils/parallel.py"", line 184, in __call__
+    return self.function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/pipeline.py"", line 1486, in _transform_one
+    res = transformer.transform(X, **params.transform)
+                                     ^^^^^^^^^^^^^^^^
+AttributeError: 'dict' object has no attribute 'transform'
+""""""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/metrics/_scorer.py"", line 170, in __call__
+    score = scorer(estimator, *args, **routed_params.get(name).score)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/metrics/_scorer.py"", line 485, in __call__
+    return estimator.score(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/pipeline.py"", line 1138, in score
+    Xt = transform.transform(Xt)
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/utils/_set_output.py"", line 334, in wrapped
+    data_to_wrap = f(self, X, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/compose/_column_transformer.py"", line 1079, in transform
+    Xs = self._call_func_on_transformers(
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/compose/_column_transformer.py"", line 889, in _call_func_on_transformers
+    return Parallel(n_jobs=self.n_jobs)(jobs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/scikit-learn/sklearn/utils/parallel.py"", line 91, in __call__
+    return super().__call__(iterable_with_config_and_warning_filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/joblib/joblib/parallel.py"", line 2094, in __call__
+    return output if self.return_generator else list(output)
+                                                ^^^^^^^^^^^^
+  File ""/home/tom/Work/prog/joblib/joblib/parallel.py"", line 1704, in _get_outputs
+    yield from self._retrieve()
+  File ""/home/tom/Work/prog/joblib/joblib/parallel.py"", line 1806, in _retrieve
+    self._raise_error_fast()
+  File ""/home/tom/Work/prog/joblib/joblib/parallel.py"", line 1881, in _raise_error_fast
+    error_job.get_result(self.timeout)
+  File ""/","using dask distributed with a pipeline and columntransformer breaks metadata routing !warning this issue is not yet ready for a pr. if you are interested in contributing to scikit-learn, please have a look at our contributing guidelines ( and in particular the sections for new contributors ( and the needs triage ( label. describe the bug and give evidence about its user-facing impact when using a pipeline with a columns transformer, using the pipeline in a distributed environment seems to raise a strange error. steps code to reproduce expected results cv score: 0.8300000000000001 cv score: 0.8300000000000001 actual results cv score: 0.8300000000000001 warnings.warn( home tom work prog scikit-learn sklearn modelselection validation.py:944: userwarning: scoring failed. the score on this train-test partition for these parameters will be set to nan. details: joblib.externals.loky.processexecutor.remotetraceback: traceback (most recent call last): file home tom work prog joblib joblib utils.py , line 109, in call return self.func(kwargs) file home tom work prog joblib joblib dask.py , line 128, in call results.append(func(args, kwargs)) file home tom work prog scikit-learn sklearn utils parallel.py , line 184, in call return self.function(args, kwargs) file home tom work prog scikit-learn sklearn pipeline.py , line 1486, in transformone res transformer.transform(x, params.transform) attributeerror: 'dict' object has no attribute 'transform' the above exception was the direct cause of the following exception: traceback (most recent call last): file home tom work prog scikit-learn sklearn metrics scorer.py , line 170, in call score scorer(estimator, args, routedparams.get(name).score) file home tom work prog scikit-learn sklearn metrics scorer.py , line 485, in call return estimator.score(args, kwargs) file home tom work prog scikit-learn sklearn pipeline.py , line 1138, in score xt transform.transform(xt) file home tom work prog scikit-learn sklearn utils setoutput.py , line 334, in wrapped datatowrap f(self, x, args, kwargs) file home tom work prog scikit-learn sklearn compose columntransformer.py , line 1079, in transform xs self.callfuncontransformers( file home tom work prog scikit-learn sklearn compose columntransformer.py , line 889, in callfuncontransformers return parallel(njobs self.njobs)(jobs) file home tom work prog scikit-learn sklearn utils parallel.py , line 91, in call return super().call(iterablewithconfigandwarningfilters) file home tom work prog joblib joblib parallel.py , line 2094, in call return output if self.returngenerator else list(output) file home tom work prog joblib joblib parallel.py , line 1704, in getoutputs yield from self.retrieve() file home tom work prog joblib joblib parallel.py , line 1806, in retrieve self.raiseerrorfast() file home tom work prog joblib joblib parallel.py , line 1881, in raiseerrorfast errorjob.getresult(self.timeout) file home tom work prog joblib joblib parallel.py , line 780, in getresult return self.returnorraise() file home tom work prog joblib joblib parallel.py , line 795, in returnorraise raise self.result attributeerror: 'dict' object has no attribute 'transform' ... x 5 cv score: nan versions interest in fixing the bug if times allow it.",open,2026-05-12 21:50:14+00:00,,,,"Bug, Needs Triage",34005,1
+comment_4435148126,comment,tomMoral,"Note that changing backend to `loky` fixes the behavior.
+Also, not using the column transformer (just the standard scaler) also remove the error.
+this probably comes from a bad deserialization of the params as a dict instead of a `Bunch` but it is unclear why it only happens for `dask`.","note that changing backend to fixes the behavior. also, not using the column transformer (just the standard scaler) also remove the error. this probably comes from a bad deserialization of the params as a dict instead of a but it is unclear why it only happens for .",open,2026-05-12 21:56:54+00:00,,issue_34005,tomMoral,,34005,0

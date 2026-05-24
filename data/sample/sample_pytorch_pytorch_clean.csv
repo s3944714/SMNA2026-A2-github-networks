@@ -1,0 +1,545 @@
+id,type,author,text,clean_text,state,created_at,closed_at,parent_id,parent_author,labels,issue_number,comment_count
+issue_183708,issue,morrison-turnansky,"torch._logging is incomplete ### 📚 The doc issue
+
+When reading https://docs.pytorch.org/tutorials/recipes/torch_logs.html links to https://docs.pytorch.org/docs/main/logging.html saying it is a complete list of logging options. However many options are missing. 
+
+While not exactly 1 to 1, https://docs.pytorch.org/docs/2.12/generated/torch._logging.set_logs.html shows many more options such as ir_post_fusion. 
+
+### Suggest a potential alternative/fix
+
+I can update list to make it complete.  pytorch/torch/_logging/_registrations.py seems to be at least a superset.
+
+cc @svekars @sekyondaMeta @AlannaBurke","torch.logging is incomplete the doc issue when reading links to saying it is a complete list of logging options. however many options are missing. while not exactly 1 to 1, shows many more options such as irpostfusion. suggest a potential alternative fix i can update list to make it complete. pytorch torch logging _registrations.py seems to be at least a superset. cc",open,2026-05-14 12:33:41+00:00,,,,"module: docs, triaged, bot-triaged",183708,0
+issue_183702,issue,DavidFFFan,"`grouped fully_shard(list) fails when a grouped module is reused later in the same iteration` ## Summary
+
+I found a case where native composable FSDP2 `fully_shard(list)` fails if a grouped module is reused later in the same iteration.
+
+The pattern is:
+
+```python
+norm -> mtp(inner uses shared head) -> shared head
+```
+
+where `shared head` is the same module instance, called once inside `mtp` and once again outside.
+
+If I wrap the tail as one grouped FSDP unit:
+
+```python
+fully_shard([model.norm, model.mtp, model.head], mesh=mesh)
+```
+
+backward fails.
+
+If I wrap the same modules separately:
+
+```python
+fully_shard(model.norm, mesh=mesh)
+fully_shard(model.mtp, mesh=mesh)
+fully_shard(model.head, mesh=mesh)
+```
+
+it succeeds.
+
+## Minimal repro
+
+```python
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp._fully_shard._fully_shard import fully_shard
+
+class TinyRMSNorm(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.norm = nn.RMSNorm(hidden_size)
+
+    def forward(self, x):
+        return self.norm(x)
+
+class SharedHead(nn.Module):
+    def __init__(self, hidden_size, vocab_size):
+        super().__init__()
+        self.linear = nn.Linear(hidden_size, vocab_size, bias=False)
+
+    def forward(self, x):
+        return self.linear(x)
+
+class TinyMTP(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.final_layernorm = TinyRMSNorm(hidden_size)
+        self.latest_aux_logits = None
+
+    def forward(self, x, shared_head):
+        x = self.proj(x)
+        x = self.final_layernorm(x)
+        self.latest_aux_logits = shared_head(x)
+        return x
+
+class Model(nn.Module):
+    def __init__(self, hidden_size=512, vocab_size=128):
+        super().__init__()
+        self.input_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.norm = TinyRMSNorm(hidden_size)
+        self.mtp = TinyMTP(hidden_size)
+        self.head = SharedHead(hidden_size, vocab_size)
+
+    def forward(self, x):
+        x = self.input_proj(x)
+        x = self.norm(x)
+        x = self.mtp(x, self.head)
+        main_logits = self.head(x)
+        aux_logits = self.mtp.latest_aux_logits
+        return main_logits.square().mean() + 0.3 * aux_logits.square().mean()
+
+def apply_fsdp(model, mesh, mode):
+    fully_shard(model.input_proj, mesh=mesh)
+    if mode == ""group"":
+        fully_shard([model.norm, model.mtp, model.head], mesh=mesh)
+    else:
+        fully_shard(model.norm, mesh=mesh)
+        fully_shard(model.mtp, mesh=mesh)
+        fully_shard(model.head, mesh=mesh)
+    fully_shard(model, mesh=mesh)
+
+def run(mode):
+    dist.init_process_group(""gloo"")
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    mesh = init_device_mesh(""cpu"", (world_size,))
+    model = Model().cpu()
+    apply_fsdp(model, mesh, mode)
+    optim = torch.optim.SGD(model.parameters(), lr=1e-3, foreach=True)
+    x = torch.randn(1, 512)
+
+    optim.zero_grad(set_to_none=True)
+    loss = model(x)
+    loss.backward()
+    optim.step()
+
+    print(f""rank={rank}, mode={mode}, loss={loss.item()}"")
+    dist.barrier()
+    dist.destroy_process_group()
+
+if __name__ == ""__main__"":
+    import sys
+    run(sys.argv[1])
+```
+
+## Repro commands
+
+Fails:
+
+```bash
+torchrun --standalone --nproc_per_node=2 repro.py group
+```
+
+Succeeds:
+
+```bash
+torchrun --standalone --nproc_per_node=2 repro.py split
+```
+
+## Error
+
+Grouped mode fails in backward with:
+
+```text
+RuntimeError: setStorage: sizes [128, 512], strides [512, 1], storage offset 0, and itemsize 4 requiring a storage size of 262144 are out of bounds for storage of size 0
+```
+
+## Why this seems like a bug
+
+The grouped `fully_shard([a, b, ...])` docs explicitly mention that grouped modules may run only partially in the main forward and be called later in the same iteration (chunked-loss style usage).
+
+I could not find a documented restriction saying that a grouped module cannot be reused/re-entered later in the same iteration.
+
+Since:
+- grouped mode fails,
+- split mode succeeds,
+- and the usage pattern seems close to the documented grouped-forward semantics,
+
+this looks like a bug (or at least an undocumented limitation) in grouped `fully_shard(list)`.
+```
+
+### Versions
+
+Collecting environment information...
+PyTorch version: 2.9.0+cpu
+Is debug build: False
+CUDA used to build PyTorch: None
+ROCM used to build PyTorch: N/A
+
+OS: openEuler 22.03 (LTS-SP1) (aarch64)
+GCC version: (GCC) 10.3.1
+Clang version: 12.0.1 (openEuler 12.0.1-4.oe2203sp1 42e43d83d1d5f202dbb00b5df9d0a23d6c326edc)
+CMake version: version 3.25.3
+Libc version: glibc-2.34
+
+Python version: 3.10.0 | packaged by conda-forge | (default, Nov 20 2021, 02:50:31) [GCC 9.4.0] (64-bit runtime)
+Python platform: Linux-5.10.0-136.108.0.188.oe2203sp1.aarch64-aarch64-with-glibc2.34
+Is CUDA available: False
+CUDA runtime version: No CUDA
+CUDA_MODULE","summary i found a case where native composable fsdp2 fails if a grouped module is reused later in the same iteration. the pattern is: where is the same module instance, called once inside and once again outside. if i wrap the tail as one grouped fsdp unit: backward fails. if i wrap the same modules separately: it succeeds. minimal repro repro commands fails: succeeds: error grouped mode fails in backward with: why this seems like a bug the grouped docs explicitly mention that grouped modules may run only partially in the main forward and be called later in the same iteration (chunked-loss style usage). i could not find a documented restriction saying that a grouped module cannot be reused re-entered later in the same iteration. since: - grouped mode fails, - split mode succeeds, - and the usage pattern seems close to the documented grouped-forward semantics, this looks like a bug (or at least an undocumented limitation) in grouped . versions collecting environment information... pytorch version: 2.9.0 cpu is debug build: false cuda used to build pytorch: none rocm used to build pytorch: n a os: openeuler 22.03 (lts-sp1) (aarch64) gcc version: (gcc) 10.3.1 clang version: 12.0.1 (openeuler 12.0.1-4.oe2203sp1 42e43d83d1d5f202dbb00b5df9d0a23d6c326edc) cmake version: version 3.25.3 libc version: glibc-2.34 python version: 3.10.0 packaged by conda-forge (default, nov 20 2021, 02:50:31) gcc 9.4.0 (64-bit runtime) python platform: linux-5.10.0-136.108.0.188.oe2203sp1.aarch64-aarch64-with-glibc2.34 is cuda available: false cuda runtime version: no cuda cudamoduleloading set to: n a gpu models and configuration: no cuda nvidia driver version: no cuda cudnn version: no cuda is xpu available: false hip runtime version: n a miopen runtime version: n a is xnnpack available: true caching allocator config: n a cpu: architecture: aarch64 cpu op-mode(s): 64-bit byte order: little endian cpu(s): 256 on-line cpu(s) list: 0-255 vendor id: hisilicon model name: kunpeng-920 model: 0 thread(s) per core: 1 core(s) per socket: 64 socket(s): 4 stepping: 0x1 bogomips: 200.00 flags: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma dcpop asimddp asimdfhm ssbs l1d cache: 16 mib (256 instances) l1i cache: 16 mib (256 instances) l2 cache: 128 mib (256 instances) l3 cache: 256 mib (8 instances) numa node(s): 8 numa node0 cpu(s): 0-31 numa node1 cpu(s): 32-63 numa node2 cpu(s): 64-95 numa node3 cpu(s): 96-127 numa node4 cpu(s): 128-159 numa node5 cpu(s): 160-191 numa node6 cpu(s): 192-223 numa node7 cpu(s): 224-255 vulnerability gather data sampling: not affected vulnerability itlb multihit: not affected vulnerability l1tf: not affected vulnerability mds: not affected vulnerability meltdown: not affected vulnerability mmio stale data: not affected vulnerability retbleed: not affected vulnerability spec store bypass: mitigation; speculative store bypass disabled via prctl vulnerability spectre v1: mitigation; user pointer sanitization vulnerability spectre v2: not affected vulnerability srbds: not affected vulnerability tsx async abort: not affected versions of relevant libraries: pip3 numpy 2.2.6 pip3 torch 2.9.0 cpu conda numpy 2.2.6 pypi0 pypi conda torch 2.9.0 cpu pypi_0 pypi cc -varma",open,2026-05-14 11:18:39+00:00,,,,"oncall: distributed, module: fsdp, bot-triaged, oncall: distributed parallelisms, ptd-bot-triaged",183702,0
+issue_183696,issue,TheoBoyer,"`torch.compile(dynamic=True)` backward fails with `InductorError: CantSplit` on chained residual blocks scattering into a wider buffer ### 🐛 Describe the bug
+
+
+A small model with two chained `x + Linear(RMSNorm(x))` residual blocks, where the residual buffer is built by scattering into a wider zero tensor, should compile and train fine under `torch.compile(..., dynamic=True, fullgraph=True)`.
+
+**Expected:** compiled forward + backward run the same as eager.
+
+**Actual:** eager works. The compiled forward also works. Only the **backward** fails, with `InductorError: CantSplit` raised from `_split_iteration_ranges`. The failing divisibility check is of the form `128 · X · (N + 1)` over `X · (N + 1)` — the quotient is the constant `128`, but Inductor reports it as not divisible.
+
+### Minimal repro on a colab with t4 runtime
+
+```python
+""""""
+Previous cell: !pip install --upgrade torch torchvision torchaudio
+""""""
+
+import os
+os.environ[""TORCHDYNAMO_VERBOSE""] = ""1""
+import torch
+
+print(""Torch version:"", torch.__version__) # Torch version: 2.12.0+cu130
+
+class M(torch.nn.Module):
+    def __init__(self, d=128):
+        super().__init__()
+        self.n1 = torch.nn.RMSNorm(d)
+        self.l1 = torch.nn.Linear(d, d, bias=False)
+        self.n2 = torch.nn.RMSNorm(d)
+        self.l2 = torch.nn.Linear(d, d, bias=False)
+
+    def forward(self, a, b):
+        m = a.shape[0] // b.shape[0]
+        out = torch.zeros(m * (b.shape[0] + 1), a.shape[-1], device=a.device)
+        out[: a.shape[0]] = a
+        out = out + self.l1(self.n1(out))
+        out = out + self.l2(self.n2(out))
+        return out.sum()
+
+dev = ""cuda""
+a, b = torch.randn(21, 128, device=dev), torch.randn(7, device=dev)
+print(""Testing eager mode..."")
+M().to(dev)(a, b).backward()
+print(""Eager mode OK"")
+print(""Testing compiled mode..."")
+torch.compile(M().to(dev), fullgraph=True, dynamic=True)(a, b).backward() # Crashes
+print(""Compiled mode OK"")
+```
+
+
+### Trigger conditions (empirically minimized)
+
+Tried each of the following in isolation that made the bug disappears:
+
+1. **Scatter (`index_put`) into a wider buffer** using shape-derived indices (`out[: a.shape[0]] = a`). Replacing with `torch.cat` makes the bug vanish.
+2. **`torch.compile(..., dynamic=True)`** with two free shape symbols (`T*N` and `N`), so `T = TN // N` becomes a `FloorDiv` in the symbolic env.
+3. **At least two `x + Linear(RMSNorm(x))` residual blocks chained.** One block, zero `Linear`s, or zero `RMSNorm`s compiles fine.
+
+### Error logs
+```
+Torch version: 2.12.0+cu130
+Testing eager mode...
+Eager mode OK
+Testing compiled mode...
+W0514 09:49:45.276000 2955 torch/_inductor/utils.py:1717] [0/0] Not enough SMs to use max_autotune_gemm mode
+---------------------------------------------------------------------------
+InductorError                             Traceback (most recent call last)
+[/tmp/ipykernel_2955/4129170816.py](https://localhost:8080/#) in <cell line: 0>()
+     28     print(""Eager mode OK"")
+     29     print(""Testing compiled mode..."")
+---> 30     torch.compile(M().to(dev), fullgraph=True, dynamic=True)(a, b).backward()
+     31     print(""Compiled mode OK"")
+
+61 frames
+[/usr/local/lib/python3.12/dist-packages/torch/_dynamo/eval_frame.py](https://localhost:8080/#) in __call__(self, *args, **kwargs)
+    471             )
+    472         with _set_in_optimized_module():
+--> 473             return super().__call__(*args, **kwargs)
+    474 
+    475     def _aot_compile(self, inputs: list[torch._dynamo.aot_compile.ModelInput]) -> None:
+
+[/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py](https://localhost:8080/#) in _wrapped_call_impl(self, *args, **kwargs)
+   1776             return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+   1777         else:
+-> 1778             return self._call_impl(*args, **kwargs)
+   1779 
+   1780     # torchrec tests the code consistency with the following code
+
+[/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py](https://localhost:8080/#) in _call_impl(self, *args, **kwargs)
+   1787                 or _global_backward_pre_hooks or _global_backward_hooks
+   1788                 or _global_forward_hooks or _global_forward_pre_hooks):
+-> 1789             return forward_call(*args, **kwargs)
+   1790 
+   1791         result = None
+
+[/usr/local/lib/python3.12/dist-packages/torch/_dynamo/eval_frame.py](https://localhost:8080/#) in compile_wrapper(*args, **kwargs)
+   1060                     # Failures in the backend likely don't have useful
+   1061                     # data in the TorchDynamo frames, so we strip them out.
+-> 1062                     raise e.remove_dynamo_frames() from None  # see TORCHDYNAMO_VERBOSE=1
+   1063                 finally:
+   1064                     # Restore the dynamic layer stack depth if necessary.
+
+[/usr/local/lib/python3.12/dist-packages/torch/_dynamo/eval_frame.py](https://localhost:8080/#) in compile_wrapper(*args, **kwargs)
+   1045                 call_succeeded = False
+   1046            ","backward fails with on chained residual blocks scattering into a wider buffer describe the bug a small model with two chained residual blocks, where the residual buffer is built by scattering into a wider zero tensor, should compile and train fine under . expected: compiled forward backward run the same as eager. actual: eager works. the compiled forward also works. only the backward fails, with raised from . the failing divisibility check is of the form over the quotient is the constant , but inductor reports it as not divisible. minimal repro on a colab with t4 runtime trigger conditions (empirically minimized) tried each of the following in isolation that made the bug disappears: 1. scatter ( ) into a wider buffer using shape-derived indices ( ). replacing with makes the bug vanish. 2. with two free shape symbols ( and ), so becomes a in the symbolic env. 3. at least two residual blocks chained. one block, zero s, or zero s compiles fine. error logs versions cc -chen -nrv",open,2026-05-14 10:11:01+00:00,,,,"triaged, oncall: pt2, module: dynamic shapes, module: inductor, bot-triaged",183696,2
+comment_4449787021,comment,TheoBoyer,The same piece of code works fine in `torch==2.10.0+cu130` and `torch==2.11.0+cu130`,the same piece of code works fine in and,open,2026-05-14 10:20:19+00:00,,issue_183696,TheoBoyer,,183696,0
+comment_4450083120,comment,sebsv123,"Ran into this too while experimenting with dynamic shapes on residual architectures. A few observations that might help narrow it down:
+
+The CantSplit error trace points to `_split_iteration_ranges` in `simd.py` failing on the expression `128*s52*((s97//s52)) + 128*((s97//s52))` not being divisible by `s52*((s97//s52)) + ((s97//s52))`. The quotient is trivially `128` (a compile-time constant), but the symbolic engine doesn't simplify `(s52 + 1) * k` over `(s52 + 1) * k` before checking divisibility, so it bails.
+
+This seems related to how `FloorDiv` symbols compose when you have two free shape dimensions (`T*N` and `N`) — the `T = TN // N` substitution produces a `FloorDiv` node that doesn't get cancelled in the divisibility check even when the result is constant.
+
+A workaround that avoids the crash: replace the scatter pattern with `torch.cat`:
+```python
+# Instead of:
+out = torch.zeros(m * (b.shape[0] + 1), a.shape[-1], device=a.device)
+out[: a.shape[0]] = a
+
+# Use:
+padding = torch.zeros(m * (b.shape[0] + 1) - a.shape[0], a.shape[-1], device=a.device)
+out = torch.cat([a, padding], dim=0)
+```
+This compiles and runs the backward fine under `dynamic=True`. Confirmed it also regresses between 2.11 and 2.12 as TheoBoyer noted.","ran into this too while experimenting with dynamic shapes on residual architectures. a few observations that might help narrow it down: the cantsplit error trace points to in failing on the expression not being divisible by . the quotient is trivially (a compile-time constant), but the symbolic engine doesn't simplify over before checking divisibility, so it bails. this seems related to how symbols compose when you have two free shape dimensions ( and ) the substitution produces a node that doesn't get cancelled in the divisibility check even when the result is constant. a workaround that avoids the crash: replace the scatter pattern with : this compiles and runs the backward fine under . confirmed it also regresses between 2.11 and 2.12 as theoboyer noted.",open,2026-05-14 10:58:51+00:00,,issue_183696,TheoBoyer,,183696,0
+issue_183686,issue,LifengWang,"[triton-cpu] All HuggingFace models of the dynamo benchmark suites failed with the latest triton-cpu backend ### 🐛 Describe the bug
+
+All HuggingFace models of the dynamo benchmark suites failed with the latest triton-cpu backend. Use AlbertForMaskedLM as example.
+
+Error log
+```
+cpu  eval  AlbertForMaskedLM                  
+loc(""/tmp/torchinductor_root/42/c4232kkgj37m2ftmtszd6tldrekdqddrcc3zq2q2ce32buia6xjs.py"":60:5): error: cannot be converted to LLVM IR: missing `LLVMTranslationDialectInterface` registration for dialect for op: ttg.barrier
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0] Triton compilation failed: triton_per_fused__log_softmax__to_copy_add_mul_native_layer_norm_nll_loss_forward_pow_tanh_view_9
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0] def triton_per_fused__log_softmax__to_copy_add_mul_native_layer_norm_nll_loss_forward_pow_tanh_view_9(in_out_ptr0, in_ptr0, in_ptr1, in_ptr2, in_ptr3, xnumel, r0_numel, XBLOCK : tl.constexpr):
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     xnumel = 1
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     r0_numel = 512
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     R0_BLOCK: tl.constexpr = 512
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     rnumel = r0_numel
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     RBLOCK: tl.constexpr = R0_BLOCK
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     xoffset = tl.program_id(0) * XBLOCK
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     xindex = xoffset + tl.arange(0, XBLOCK)[:, None]
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     xmask = tl.full([XBLOCK], True, tl.int1)[:, None]
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     r0_index = tl.arange(0, R0_BLOCK)[None, :]
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     r0_offset = 0
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     r0_mask = tl.full([R0_BLOCK], True, tl.int1)[None, :]
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     roffset = r0_offset
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     rindex = r0_index
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     r0_0 = r0_index
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp0 = tl.load(in_ptr0 + (r0_0), None)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp12 = tl.load(in_ptr2 + (r0_0), None)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp14 = tl.load(in_ptr3 + (r0_0), None)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp1 = tl.full([1, 1], -100, tl.int64)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp2 = tmp0 != tmp1
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp3 = tl.full([1, 1], 0, tl.int64)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp4 = tl.where(tmp2, tmp0, tmp3)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp5 = tl.full([1, 1], 30000, tl.int32)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp6 = tmp4 + tmp5
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp7 = tmp4 < 0
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp8 = tl.where(tmp7, tmp6, tmp4)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tl.device_assert((0 <= tmp8) & (tmp8 < 30000), ""index out of bounds: 0 <= tmp8 < 30000"")
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_inductor/runtime/triton_heuristics.py:934] [0/0]     tmp10 = tl.load(in_ptr1 + (tmp8 + 30000*r0_0), None, eviction_policy='evict_last').to(tl.float32)
+E0428 17:18:32.850000 100148 /workspace/pytorch/torch/_induct",triton-cpu all huggingface models of the dynamo benchmark suites failed with the latest triton-cpu backend describe the bug all huggingface models of the dynamo benchmark suites failed with the latest triton-cpu backend. use albertformaskedlm as example. error log reproduce scripts versions cc -chen -nrv,open,2026-05-14 08:52:10+00:00,,,,"module: cpu, triaged, oncall: pt2, module: inductor, bot-triaged",183686,0
+issue_183685,issue,warrendeng,"[Triton pin 000000000000] CI failure tracker **TEST - IGNORE - PLEASE CLOSE IF STILL OPEN**
+
+Smoke-testing the unified GH_TOKEN-based auth path in skill_helper.py.
+Will be closed within seconds of creation.
+
+<!-- triton-pin-tracker: 0000000000000000000000000000000000000000 -->
+
+
+_Body updated via PATCH endpoint to verify _update_upstream_issue._",triton pin 000000000000 ci failure tracker test - ignore - please close if still open smoke-testing the unified ghtoken-based auth path in skillhelper.py. will be closed within seconds of creation. body updated via patch endpoint to verify updateupstreamissue._,closed,2026-05-14 08:47:38+00:00,2026-05-14 08:47:39+00:00,,,,183685,0
+issue_183679,issue,sanketpurandare,"[Inductor][Bucketing] Nested bucket traces should ignore ambient pending unbacked symbols ## Summary
+
+Inductor collective bucketing can fail when its nested `make_fx` trace observes pending unbacked symbols from an outer fake/dynamic-shape trace.
+
+Bucketing traces small collective rewrite helpers while reusing the surrounding `FakeTensorMode`. If that shared `ShapeEnv` already has pending fresh unbacked symbols from an unrelated outer trace, `compute_unbacked_bindings` can require those ambient symbols to be bound by the bucket trace outputs. The bucket helper itself may only operate on static tensors, so those symbols are unrelated and cannot be bound by the nested trace.
+
+## Reproducer
+
+```python
+import torch
+from torch._C import FileCheck
+from torch._inductor.fx_passes.bucketing import _trace as bucketing_trace
+from torch._subclasses import FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+
+fake_mode = FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv())
+x = fake_mode.from_tensor(torch.randn(2, 2), static_shapes=True)
+
+ambient = fake_mode.shape_env.create_unbacked_symint().node.expr
+assert ambient in fake_mode.shape_env.pending_fresh_unbacked_symbols
+
+gm = bucketing_trace(lambda x: x + 1, (x,))
+
+assert ambient in fake_mode.shape_env.pending_fresh_unbacked_symbols
+FileCheck().check(""aten.add"").run(gm.code)
+print(gm.code)
+```
+
+## Expected behavior
+
+The nested bucketing trace should only be responsible for symbols created by the bucketing trace itself. Ambient pending unbacked symbols from the surrounding trace should remain pending for the outer trace and should not be required in the bucket helper outputs.
+
+## Actual behavior
+
+The nested `make_fx` trace can fail with `PendingUnbackedSymbolNotFound` for an ambient unbacked symbol that is unrelated to the bucket inputs and outputs.
+
+## Notes
+
+The bucketing trace should snapshot and clear pending/ignorable fresh unbacked symbols around the nested `make_fx` call, then restore the ambient state afterward.
+
+
+
+cc @chauhang @penguinwu @eellison @aorenste @ezyang @bobrenjc93 @aditvenk @laithsakka @voznesenskym @EikanWang @jgong5 @Guobing-Chen @XiaobingSuper @zhuhaozhe @blzheng @wenzhe-nrv @jiayisunx @ipiszy @kadeng @muchulee8 @amjames @aakhundov @coconutruben @jataylo @bdhirsh","inductor bucketing nested bucket traces should ignore ambient pending unbacked symbols summary inductor collective bucketing can fail when its nested trace observes pending unbacked symbols from an outer fake dynamic-shape trace. bucketing traces small collective rewrite helpers while reusing the surrounding . if that shared already has pending fresh unbacked symbols from an unrelated outer trace, can require those ambient symbols to be bound by the bucket trace outputs. the bucket helper itself may only operate on static tensors, so those symbols are unrelated and cannot be bound by the nested trace. reproducer expected behavior the nested bucketing trace should only be responsible for symbols created by the bucketing trace itself. ambient pending unbacked symbols from the surrounding trace should remain pending for the outer trace and should not be required in the bucket helper outputs. actual behavior the nested trace can fail with for an ambient unbacked symbol that is unrelated to the bucket inputs and outputs. notes the bucketing trace should snapshot and clear pending ignorable fresh unbacked symbols around the nested call, then restore the ambient state afterward. cc -chen -nrv",open,2026-05-14 08:17:25+00:00,,,,"triaged, oncall: pt2, module: fakeTensor, module: dynamic shapes, module: inductor, module: pt2-dispatcher, bot-triaged",183679,0
+issue_183678,issue,sanketpurandare,"[DTensor] Hinted even unbacked shard sizes still take symbolic padding path ## Summary
+
+DTensor placement logic conservatively takes the padding path for unbacked shard dimensions even when an explicit optimization hint says the dimension is evenly divisible by the mesh size.
+
+For arbitrary unbacked SymInts that is the safe default, because `guard_or_false(size % num_chunks == 0)` cannot prove divisibility. However, when the frontend has explicitly provided an optimization hint for an unbacked shard dimension and the hint is divisible by the mesh size, DTensor still traces symbolic padding/unpadding. That path constructs symbolic pad sizes, and those eventually flow into padding helpers that require concrete Python padding values.
+
+## Reproducer
+
+```python
+import torch
+from torch._subclasses import FakeTensorMode
+from torch.distributed.tensor.placement_types import Shard
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+
+fake_mode = FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv())
+shard = Shard(0)
+
+with fake_mode:
+    dim_size = fake_mode.shape_env.create_unbacked_symint()
+    torch._dynamo.override_optimization_hint(dim_size, 8)
+
+    local_tensor = torch.empty(dim_size // 4, 4)
+    full_tensor = torch.empty(dim_size, 4)
+
+    padded = shard._maybe_pad_tensor(local_tensor, dim_size, 4)
+    unpadded = shard._maybe_unpad_tensor(full_tensor, dim_size, 4)
+
+print(""padded shape:"", padded.shape)
+print(""unpadded shape:"", unpadded.shape)
+```
+
+## Expected behavior
+
+DTensor should be able to trace the no-padding policy for explicitly hinted, evenly sharded unbacked sizes, while preserving runtime correctness with a symbolic precondition such as:
+
+```python
+torch._check(dim_size % 4 == 0)
+```
+
+Runtime sizes that satisfy the divisibility condition should continue to work, and sizes that do not should fail closed.
+
+## Actual behavior
+
+The unbacked divisibility predicate is not guardable at trace time, so DTensor takes the conservative padding path. Even if the runtime size would need zero padding, the traced path still computes symbolic pad sizes from the unbacked SymInt and can fail when those symbolic values reach padding/unpadding helpers that need concrete Python padding values.
+
+## Notes
+
+The optimization hint should not specialize tensor shapes or replace the symbolic dimension. It is only useful as a trace-time policy selector for the no-padding branch; the generated graph still needs to carry the real symbolic divisibility check.
+
+
+
+cc @awgu @wanchaol @fegin @fduwjj @wz337 @wconstab @d4l3k @pragupta @msaroufim @dcci @aditvenk @weifengpy @tianyu-l @XilunWu @SherlockNoMad @ppwwyyxx","dtensor hinted even unbacked shard sizes still take symbolic padding path summary dtensor placement logic conservatively takes the padding path for unbacked shard dimensions even when an explicit optimization hint says the dimension is evenly divisible by the mesh size. for arbitrary unbacked symints that is the safe default, because cannot prove divisibility. however, when the frontend has explicitly provided an optimization hint for an unbacked shard dimension and the hint is divisible by the mesh size, dtensor still traces symbolic padding unpadding. that path constructs symbolic pad sizes, and those eventually flow into padding helpers that require concrete python padding values. reproducer expected behavior dtensor should be able to trace the no-padding policy for explicitly hinted, evenly sharded unbacked sizes, while preserving runtime correctness with a symbolic precondition such as: runtime sizes that satisfy the divisibility condition should continue to work, and sizes that do not should fail closed. actual behavior the unbacked divisibility predicate is not guardable at trace time, so dtensor takes the conservative padding path. even if the runtime size would need zero padding, the traced path still computes symbolic pad sizes from the unbacked symint and can fail when those symbolic values reach padding unpadding helpers that need concrete python padding values. notes the optimization hint should not specialize tensor shapes or replace the symbolic dimension. it is only useful as a trace-time policy selector for the no-padding branch; the generated graph still needs to carry the real symbolic divisibility check. cc -l",open,2026-05-14 08:17:25+00:00,,,,"oncall: distributed, enhancement, module: dtensor, bot-triaged, oncall: distributed parallelisms, ptd-bot-triaged",183678,0
+issue_183677,issue,sanketpurandare,"[HOP] Alias/mutation fake traces should ignore discarded unbacked symbols ## Summary
+
+FlexAttention can fail during HOP metadata/functionalization when it is used with dynamic block-mask inputs.
+
+The relevant path is:
+
+`torch.compile(flex_attention)` -> `flex_attention_hop` -> FlexAttention functionalization -> score_mod alias/mutation query -> nested fake trace.
+
+That nested trace is only a diagnostic query: it answers whether `score_mod` may mutate captured inputs. The graph is discarded. With dynamic block-mask metadata, fake propagation can leave fresh unbacked symbols pending in the surrounding `ShapeEnv`. Those symbols are not semantic outputs of the score-mod alias/mutation query, but `compute_unbacked_bindings` can still require them to appear in the returned value and raise `PendingUnbackedSymbolNotFound`.
+
+## Reproducer
+
+```python
+import torch
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+
+if not torch.cuda.is_available():
+    raise RuntimeError(""This repro needs CUDA because FlexAttention backward is CUDA-only."")
+
+
+device = ""cuda""
+dtype = torch.float16
+
+
+def score_mod(score, batch, head, q_idx, kv_idx):
+    return score
+
+
+compiled_create_block_mask = torch.compile(
+    create_block_mask,
+    dynamic=True,
+    fullgraph=True,
+)
+
+
+def create_dynamic_block_mask(q_batch, kv_batch):
+    q_len = q_batch.size(0)
+    kv_len = kv_batch.size(0)
+
+    def mask_mod(batch, head, q_idx, kv_idx):
+        q_group = q_batch[q_idx]
+        kv_group = kv_batch[kv_idx]
+        return (q_group == kv_group) & (q_group != -1) & (kv_group != -1)
+
+    return compiled_create_block_mask(
+        mask_mod,
+        B=None,
+        H=None,
+        Q_LEN=q_len,
+        KV_LEN=kv_len,
+        device=device,
+        BLOCK_SIZE=128,
+    )
+
+
+groups = torch.zeros(128, dtype=torch.int64, device=device)
+block_mask = create_dynamic_block_mask(groups, groups)
+
+q = torch.randn(1, 1, 128, 64, device=device, dtype=dtype, requires_grad=True)
+k = torch.randn(1, 1, 128, 64, device=device, dtype=dtype, requires_grad=True)
+v = torch.randn(1, 1, 128, 64, device=device, dtype=dtype, requires_grad=True)
+
+compiled_flex_attention = torch.compile(
+    flex_attention,
+    fullgraph=True,
+    dynamic=True,
+    backend=""aot_eager"",
+)
+
+out = compiled_flex_attention(q, k, v, score_mod=score_mod, block_mask=block_mask)
+out.sum().backward()
+torch.cuda.synchronize()
+print(""ok"", out.shape)
+```
+
+## Expected behavior
+
+The compiled FlexAttention forward and backward should complete. The score-mod alias/mutation query should be allowed to discard fresh unbacked symbols created only for HOP metadata/fake propagation.
+
+## Actual behavior
+
+The FlexAttention HOP metadata path can fail with:
+
+```text
+PendingUnbackedSymbolNotFound: Pending unbacked symbols {...} not in returned outputs ...
+```
+
+The pending symbols are not part of the user-visible output. They are created during the internal fake/metadata trace used by the HOP alias/mutation check.
+
+## Notes
+
+The internal HOP trace should run under the existing ""ignore fresh unbacked symbols"" contract, and `compute_unbacked_bindings` should honor that contract by treating pending symbols as ignorable while that TLS is active. This keeps diagnostic fake traces from imposing output-binding requirements on symbols that are intentionally discarded with the diagnostic graph.
+","hop alias mutation fake traces should ignore discarded unbacked symbols summary flexattention can fail during hop metadata functionalization when it is used with dynamic block-mask inputs. the relevant path is: - - flexattention functionalization - score_mod alias mutation query - nested fake trace. that nested trace is only a diagnostic query: it answers whether may mutate captured inputs. the graph is discarded. with dynamic block-mask metadata, fake propagation can leave fresh unbacked symbols pending in the surrounding . those symbols are not semantic outputs of the score-mod alias mutation query, but can still require them to appear in the returned value and raise . reproducer expected behavior the compiled flexattention forward and backward should complete. the score-mod alias mutation query should be allowed to discard fresh unbacked symbols created only for hop metadata fake propagation. actual behavior the flexattention hop metadata path can fail with: the pending symbols are not part of the user-visible output. they are created during the internal fake metadata trace used by the hop alias mutation check. notes the internal hop trace should run under the existing ignore fresh unbacked symbols contract, and should honor that contract by treating pending symbols as ignorable while that tls is active. this keeps diagnostic fake traces from imposing output-binding requirements on symbols that are intentionally discarded with the diagnostic graph.",open,2026-05-14 08:17:25+00:00,,,,"triaged, oncall: pt2, module: fakeTensor, module: dynamic shapes, module: higher order operators, module: pt2-dispatcher, bot-triaged",183677,0

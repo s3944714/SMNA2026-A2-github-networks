@@ -1,0 +1,147 @@
+id,type,author,text,clean_text,state,created_at,closed_at,parent_id,parent_author,labels,issue_number,comment_count
+issue_45950,issue,Priyabhunia,"BAN sorry for creating this issue but this is little unrelated
+
+Hey any maintainer here or mod here from discord , or if you know someone to connect .My account is banned from the discord server because my account was hacked and spammed ... is there anyone who can help me to unban .
+
+I am not able to find anyone","ban sorry for creating this issue but this is little unrelated hey any maintainer here or mod here from discord , or if you know someone to connect .my account is banned from the discord server because my account was hacked and spammed ... is there anyone who can help me to unban . i am not able to find anyone",open,2026-05-13 19:09:56+00:00,,,,,45950,1
+comment_4447936440,comment,Priyabhunia,"from hugging face discord server 
+
+here is my username at discord @laxis_op
+
+",from hugging face discord server here is my username at discord,open,2026-05-14 05:36:11+00:00,,issue_45950,Priyabhunia,,45950,0
+issue_45941,issue,drewvenegas,"FSDP + KD-teacher-wrap + flash-attn-2 + LoRA: working-set memory exceeds 40 GiB per rank on production-shape SFT training (deepseek-coder-6.7b + sahil2801/CodeAlpaca-20k) ## Summary
+
+We're running supervised fine-tuning of `deepseek-ai/deepseek-coder-6.7b-instruct` with LoRA (PEFT) + Knowledge Distillation (teacher = same architecture as student, full bf16 replica), via the HF `Trainer` with FSDP `full_shard` integration, `attn_implementation=""flash_attention_2""`, bf16, world_size=8, on AWS SageMaker HuggingFace DLC. The training-step-0 forward pass exhausts per-rank GPU memory on **every** evaluated hardware class, including A100 40 GiB (`ml.p4d.24xlarge` × 8 ranks). After 23 attempts spanning two DLC versions, three hardware classes, and progressive algorithm tunings (FSDP wrap of both student AND teacher, flash-attention-2 with sdpa fallback, non-reentrant gradient checkpointing, `bf16` + `bf16_full_eval`, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, FSDP-owned activation_checkpointing), the production-shape working set on FSDP `world_size=8` still exceeds ~40 GiB per rank.
+
+We'd like HuggingFace's input on the **recommended FSDP integration pattern for KD-distillation training where both student and teacher need to be sharded coherently** — and whether DeepSpeed ZeRO-3 (with HF Trainer's `deepspeed=` integration) is the recommended fallback for this class of recipe.
+
+## Reproducer
+
+The recipe is documented across two private repositories:
+
+- `config/training/codex_02_sft.yaml` (per-model hyperparameters: `batch_size=4`, `max_length=4096`, `alpha_kd=0.7`, `alpha_attention=0.2`, `alpha_hidden=0.1`, `fsdp_enabled=true`, `fsdp_transformer_layer_cls_to_wrap=LlamaDecoderLayer`, `fsdp_wrap_teacher=true`, `attn_implementation=flash_attention_2`, dataset = `sahil2801/CodeAlpaca-20k` via HF Hub).
+- `d3n_training/entry_points/sagemaker_entry_v2.py::train_causal_lm` — builds the `TrainingArguments` with `fsdp=""full_shard auto_wrap""`, `fsdp_config={""transformer_layer_cls_to_wrap"": ""LlamaDecoderLayer""}`, `bf16=True`, `gradient_checkpointing=True`, `gradient_checkpointing_kwargs={""use_reentrant"": False}`, `eval_strategy=""no""`, then instantiates a custom `KDTrainer` (subclass of `Trainer`) that loads a teacher model via `transformers.AutoModelForCausalLM.from_pretrained(..., torch_dtype=torch.bfloat16, attn_implementation=""flash_attention_2"")` and wraps it with `torch.distributed.fsdp.FullyShardedDataParallel(...)` before the first training step.
+- `d3n_training/training/distillation.py::load_teacher_model` and `fsdp_wrap_teacher_model` — the teacher load + FSDP wrap path.
+
+The training loop is a standard `Trainer.train()` call; no custom collator or sampler.
+
+## Hardware tested
+
+| Hardware | SM | Per-rank capacity | World size | Result |
+|----------|-----|-------------------|-----------|--------|
+| A10G (`ml.g5.12xlarge`) | 86 | 22.30 GiB | 4 | OOM at KD-teacher load (Appendix L); resolved by FSDP-wrap of teacher → OOM at eager-softmax (M); resolved by flash-attn-2 → OOM at autocast convert_to_fp32 (N); resolved by autocast tuning → working-set ceiling at ~21 GiB allocated (O) |
+| A10G (`ml.g5.48xlarge`) | 86 | 22.30 GiB | 8 | Non-deterministic `SIGSEGV` (`exitcode -11`) at training-step-0, no Python traceback, ~5 s after `Starting causal LM training...` (Appendices R/S); reproduced on different ranks across cycles |
+| A10G (`ml.g5.48xlarge`) | 86 | 22.30 GiB | 8 | Pre-NCCL CUDA OOM on all 8 ranks during `AutoModelForCausalLM.from_pretrained` of the teacher when `fsdp_wrap_teacher=False` is set (Appendix T) — `accelerate.set_module_tensor_to_device` 2× transient + pre-FSDP student replica + flash-attn workspace + `CUDA_LAUNCH_BLOCKING=1` async-coalescing inhibition all sum past 22.30 GiB |
+| **A100 (`ml.p4d.24xlarge`)** | **80** | **39.49 GiB** | **8** | **`torch.OutOfMemoryError` on rank 3 at step-0 forward, ~39.17 GiB / 39.49 GiB consumed (35.14 GiB allocated by PyTorch + 2.84 GiB reserved-but-unallocated); ranks 6+7 also faulted within the same 344 MiB step-0 forward allocation window. SIGSEGV class from A10G implicitly disproven — the same algorithm-side code path ran clean on A100 SM 80 through Downloading → Training before OOM'ing on memory pressure.** |
+
+## DLC versions tested
+
+- `huggingface-pytorch-training:2.5.1-transformers4.49.0-gpu-py311-cu124-ubuntu22.04-v1.0` (torch-2.4, NCCL ~2.20, cu124) — the A10G SIGSEGV case (Appendices R/S).
+- `huggingface-pytorch-training:2.8.0-transformers4.56.2-gpu-py312-cu129-ubuntu22.04-v1.1` (torch-2.8, NCCL ~2.24+, cu129) — the A10G `TypeError` on `evaluation_strategy` (Appendix U; resolved by rename to `eval_strategy`); the A100 working-set OOM (Appendix V).
+
+Both DLCs hit a memory ceiling at step-0 forward when paired with the production-shape recipe; the new DLC clears the SIGSEGV class on A100 (and likely on A10G too, untested).
+
+## Memory budget analysis (per-rank, Appendix V verbatim)
+
+Per-rank working-set components at step-0 forward on A100 40 GiB × 8:
+
+| Com","fsdp kd-teacher-wrap flash-attn-2 lora: working-set memory exceeds 40 gib per rank on production-shape sft training (deepseek-coder-6.7b sahil2801 codealpaca-20k) summary we're running supervised fine-tuning of with lora (peft) knowledge distillation (teacher same architecture as student, full bf16 replica), via the hf with fsdp integration, , bf16, worldsize 8, on aws sagemaker huggingface dlc. the training-step-0 forward pass exhausts per-rank gpu memory on every evaluated hardware class, including a100 40 gib ( 8 ranks). after 23 attempts spanning two dlc versions, three hardware classes, and progressive algorithm tunings (fsdp wrap of both student and teacher, flash-attention-2 with sdpa fallback, non-reentrant gradient checkpointing, , , fsdp-owned activationcheckpointing), the production-shape working set on fsdp still exceeds 40 gib per rank. we'd like huggingface's input on the recommended fsdp integration pattern for kd-distillation training where both student and teacher need to be sharded coherently and whether deepspeed zero-3 (with hf trainer's integration) is the recommended fallback for this class of recipe. reproducer the recipe is documented across two private repositories: - (per-model hyperparameters: , , , , , , , , , dataset via hf hub). - builds the with , , , , , , then instantiates a custom (subclass of ) that loads a teacher model via and wraps it with before the first training step. - and the teacher load fsdp wrap path. the training loop is a standard call; no custom collator or sampler. hardware tested hardware sm per-rank capacity world size result ---------- ----- ------------------- ----------- -------- a10g ( ) 86 22.30 gib 4 oom at kd-teacher load (appendix l); resolved by fsdp-wrap of teacher oom at eager-softmax (m); resolved by flash-attn-2 oom at autocast converttofp32 (n); resolved by autocast tuning working-set ceiling at 21 gib allocated (o) a10g ( ) 86 22.30 gib 8 non-deterministic ( ) at training-step-0, no python traceback, 5 s after (appendices r s); reproduced on different ranks across cycles a10g ( ) 86 22.30 gib 8 pre-nccl cuda oom on all 8 ranks during of the teacher when is set (appendix t) 2 transient pre-fsdp student replica flash-attn workspace async-coalescing inhibition all sum past 22.30 gib a100 ( ) 80 39.49 gib 8 on rank 3 at step-0 forward, 39.17 gib 39.49 gib consumed (35.14 gib allocated by pytorch 2.84 gib reserved-but-unallocated); ranks 6 7 also faulted within the same 344 mib step-0 forward allocation window. sigsegv class from a10g implicitly disproven the same algorithm-side code path ran clean on a100 sm 80 through downloading training before oom'ing on memory pressure. dlc versions tested - (torch-2.4, nccl 2.20, cu124) the a10g sigsegv case (appendices r s). - (torch-2.8, nccl 2.24 , cu129) the a10g on (appendix u; resolved by rename to ); the a100 working-set oom (appendix v). both dlcs hit a memory ceiling at step-0 forward when paired with the production-shape recipe; the new dlc clears the sigsegv class on a100 (and likely on a10g too, untested). memory budget analysis (per-rank, appendix v verbatim) per-rank working-set components at step-0 forward on a100 40 gib 8: component memory ----------- -------- student fsdp shard (6.7b bf16 8 ranks) 1.7 gib teacher fsdp all-gather buffer (transient peak during kd forward) 13.4 gib per-layer activations (b 4, s 4096, h 4096, 32 layers, flash-attn-2 non-reentrant gradient-checkpointing) 2-5 gib autocast loss-path transients 1-4 gib optimizer-state slabs (accelerator.prepare; not yet sharded on step-0 first pass) 3-6 gib gradient buffers (in-flight backward) 2-4 gib nccl cuda pinned flash-attn workspace cublas handles 1-3 gib observed total 35.14 gib allocated 2.84 gib reserved-but-unallocated oom at 344 mib step-0 forward intermediate the dominant peak is the fsdp-wrapped teacher's pre-forward all-gather stacked with optimizer-state initialisation that hasn't yet sharded. fsdp's is built at the end of step-0; the first forward backward pays full-replica overhead on optimizer state before the shard rebalances. this is a documented fsdp first-step memory peak, but it isn't commonly hit because most recipes don't simultaneously hold a kd-teacher full-replica all-gather alongside it. question for huggingface 1. is there a recommended fsdp integration pattern for kd-distillation training that shards both student and teacher coherently e.g., a single composite unit wrapping both models so the teacher's all-gather is sized down by ? 2. alternatively, is hf trainer's integration with zero-3 (with optimizer-state cpu offload) the recommended pattern for this class of recipe? are there documented gotchas with peft custom data-collators flash-attn-2 zero-3 that we should anticipate before doing the migration? 3. the reduced-shape config ( , , kd off, aux-heads off) on a single a10g via ddp lora non-reentrant gradient checkpointing runs cleanly on the same dlc tarball. we're confident the recipe and chain are correct under hf's standard patterns; we want hf's input on the fsdp kd-teacher lora flash-attn-2 bf16 working-set ceiling we're hitting. what we tried (appendices l v, in order, with verbatim cloudwatch evidence in the runbook) 1. fsdp plumbing in hf via partially resolved. 2. manual fsdp wrap of the kd teacher (path b'' necessary because 's fsdp integration shards only the trainer's student model, leaving the teacher as a full bf16 replica per rank). 3. on both student and teacher (with sdpa fallback) resolved the eager-softmax 8 gib activation oom. 4. neutralised allocator fragmentation (2.21 0.47 gib tail). 5. broke peft fp32-lora bf16-base dtype mixing; reverted. 6. fsdp-owned (post-pr migration from path) . 7. hardware pivot a10g a100 ( ). 8. dlc upgrade 4.49.0 4.56.2 (caught rename). all cycles documented in the public stage-3 runbook (private repo, but the cloudwatch traces are reproducible from the verbatim strings quoted above). workaround in use we've switched the codex-02 sft cycle to a reduced-shape config (kd disabled, no aux-heads, , , single-a10g ddp lora) a valid hf cycle that completes cleanly and exercises the full sagemaker chain end-to-end. this loses the representation-learning signal the production recipe was designed around (the kd teacher and aux-heads), so we're treating this as a partial production rollout while we sort out the working-set ceiling for the full recipe. asks - any pointers to a working hf fsdp kd-teacher pattern we can compare against. - confirmation (or rebuttal) of the fsdp first-step optimizer-state memory peak hypothesis. - guidance on whether to migrate to zero-3 for this recipe class. thanks!",closed,2026-05-13 11:20:34+00:00,2026-05-13 13:07:56+00:00,,,,45941,1
+comment_4441312068,comment,Rocketknight1,"This isn't really a bug I'm afraid, it's basically a request for us to act as software consultants! We do not have maintainer capacity to do this kind of thing for free.","this isn't really a bug i'm afraid, it's basically a request for us to act as software consultants! we do not have maintainer capacity to do this kind of thing for free.",closed,2026-05-13 13:07:56+00:00,,issue_45941,drewvenegas,,45941,0
+issue_45938,issue,WKQ9411,"[DeepSeekV4] Compressor does not seem to account for padding tokens when forming compressed KV blocks ## Description
+
+I noticed a potential padding-related issue in the current DeepSeekV4 implementation.
+
+The sliding-window attention path appears to correctly receive the user-provided `attention_mask` through `create_sliding_window_causal_mask`, so padded key/value tokens can be masked out in the normal attention path.
+
+However, the HCA / CSA compressor path seems to form compressed KV entries from the projected `kv` / `gate` tensors without using the input `attention_mask`.
+
+From my reading, the compressor first projects hidden states into `kv` and `gate`, then stores/chunks them through the cache layer, and finally performs softmax-gated pooling to produce compressed KV entries. This means padding tokens may still participate in compressed KV construction.
+
+For example, with right padding:
+
+```text
+attention_mask = [1, 1, 1, 0]
+compress_rate = 4
+````
+
+the compressor may form one compressed block from:
+
+```text
+[token_0, token_1, token_2, pad]
+```
+
+Even though the pad token is masked in the normal sliding-window attention mask, it may still contribute to the compressed KV entry.
+
+## Question
+
+If padding is intended to be supported, should the compressor receive `attention_mask` and use it when forming compressed KV blocks?
+
+Thanks!","deepseekv4 compressor does not seem to account for padding tokens when forming compressed kv blocks description i noticed a potential padding-related issue in the current deepseekv4 implementation. the sliding-window attention path appears to correctly receive the user-provided through , so padded key value tokens can be masked out in the normal attention path. however, the hca csa compressor path seems to form compressed kv entries from the projected tensors without using the input . from my reading, the compressor first projects hidden states into and , then stores chunks them through the cache layer, and finally performs softmax-gated pooling to produce compressed kv entries. this means padding tokens may still participate in compressed kv construction. for example, with right padding: attention_mask and use it when forming compressed kv blocks? thanks!",open,2026-05-13 08:06:41+00:00,,,,,45938,5
+comment_4440132023,comment,ArjunSrivastava1,"huh? another deepseekv4 issue? 
+i understand ya, but its a bit unclear rn
+well, i suppose you should read through these too #45820, and #45758 
+
+these mention how there were problems in the query mask and how causality is not maintained, basically query q[t] where t -> limit could still retrieve or see info from out of the limit
+which, was fixed just yesterday fully
+
+ig it should for the attention masking, but ur point remains a bit vague, specify it further like, which stages do u refer to and where the values are supposed to be etc etc","huh? another deepseekv4 issue? i understand ya, but its a bit unclear rn well, i suppose you should read through these too 45820, and 45758 these mention how there were problems in the query mask and how causality is not maintained, basically query q t where t - limit could still retrieve or see info from out of the limit which, was fixed just yesterday fully ig it should for the attention masking, but ur point remains a bit vague, specify it further like, which stages do u refer to and where the values are supposed to be etc etc",open,2026-05-13 10:52:43+00:00,,issue_45938,WKQ9411,,45938,0
+comment_4440468950,comment,WKQ9411,"> huh? another deepseekv4 issue? 
+> i understand ya, but its a bit unclear rn
+> well, i suppose you should read through these too #45820, and #45758 
+> 
+> these mention how there were problems in the query mask and how causality is not maintained, basically query q[t] where t -> limit could still retrieve or see info from out of the limit
+> which, was fixed just yesterday fully
+> 
+> ig it should for the attention masking, but ur point remains a bit vague, specify it further like, which stages do u refer to and where the values are supposed to be etc etc
+
+Thanks, I understand that #45820 / #45758 fixed the query-to-compressed-slot visibility issue after compressed entries are created.
+
+My concern is about an earlier stage: source-token-to-compressed-entry construction, especially in a padded batch.
+
+For example, suppose:
+
+```
+compress_rate = 4
+
+sample 0 attention_mask = [1, 1, 1, 1]
+sample 0 tokens          = [A, B, C, D]
+
+sample 1 attention_mask = [1, 1, 1, 0]
+sample 1 tokens          = [E, F, G, PAD]
+```
+
+Since the batch tensor has shape ""[2, 4]"", the compressor may chunk both samples by physical positions and form:
+
+```
+sample 0 compressed_entry_0 = compress([A, B, C, D])
+sample 1 compressed_entry_0 = compress([E, F, G, PAD])
+```
+
+The ""block_bias"" logic can control whether a query is allowed to attend to ""compressed_entry_0"", but it does not seem to prevent ""PAD"" from participating in the softmax-gated pooling that creates ""sample 1 compressed_entry_0"".
+
+So I am not referring to whether a query can see future/out-of-limit compressed slots. I am asking whether padding tokens should be excluded when constructing compressed KV entries, or whether padded batches are intentionally unsupported for the compressor path.","huh? another deepseekv4 issue? i understand ya, but its a bit unclear rn well, i suppose you should read through these too 45820, and 45758 these mention how there were problems in the query mask and how causality is not maintained, basically query q t where t - limit could still retrieve or see info from out of the limit which, was fixed just yesterday fully ig it should for the attention masking, but ur point remains a bit vague, specify it further like, which stages do u refer to and where the values are supposed to be etc etc thanks, i understand that 45820 45758 fixed the query-to-compressed-slot visibility issue after compressed entries are created. my concern is about an earlier stage: source-token-to-compressed-entry construction, especially in a padded batch. for example, suppose: since the batch tensor has shape 2, 4 , the compressor may chunk both samples by physical positions and form: the blockbias logic can control whether a query is allowed to attend to compressedentry0 , but it does not seem to prevent pad from participating in the softmax-gated pooling that creates sample 1 compressedentry_0 . so i am not referring to whether a query can see future out-of-limit compressed slots. i am asking whether padding tokens should be excluded when constructing compressed kv entries, or whether padded batches are intentionally unsupported for the compressor path.",open,2026-05-13 11:30:09+00:00,,issue_45938,WKQ9411,,45938,0
+comment_4441685186,comment,ArjunSrivastava1,"@Rocketknight1, i take it this has been looked into as well then?
+
+comparing with the same pr #45892 , its isnt really mentioned there, i was studying the diagrams for attentions in the original paper just now, and yeah, this is a concern along with that other one, even more so cus this is a very short while ago
+
+@WKQ9411 as for ur question... what i found from the paper is that padding is, indeed and explicitly mentioned
+1. Padding is acceptable with <10% overhead
+2. When compression spans ranks, padding entries are intentionally produced and placed at the tail
+3. Block padding for cache alignment is explicitly endorsed (multiples of lcm(m, m'))
+
+which means, the padded batches are meant to be supported, theyre used to ensure a lot of things - see above three, however for the latter part; theyre also to be excluded and not accounted for the compressed portion
+
+will have to run some correctness checks on the implementation now ig
+
+> If padding is intended to be supported, should the compressor receive attention_mask and use it when forming compressed > KV blocks?
+
+Yes, it is",", i take it this has been looked into as well then? comparing with the same pr 45892 , its isnt really mentioned there, i was studying the diagrams for attentions in the original paper just now, and yeah, this is a concern along with that other one, even more so cus this is a very short while ago as for ur question... what i found from the paper is that padding is, indeed and explicitly mentioned 1. padding is acceptable with if padding is intended to be supported, should the compressor receive attention_mask and use it when forming compressed kv blocks? yes, it is",open,2026-05-13 13:52:07+00:00,,issue_45938,WKQ9411,,45938,0
+comment_4441944536,comment,WKQ9411,Thanks for checking the paper. That matches my concern.,thanks for checking the paper. that matches my concern.,open,2026-05-13 14:18:28+00:00,,issue_45938,WKQ9411,,45938,0
+comment_4449785122,comment,ArjunSrivastava1,"Confirmed and is a rather srs bug
+went down hunting in the transformer and model files, 3 matches of compressor and it doesnt indeed, pass the attention mask as needed for csa - thats, the main feature for csa too, it does provide pad(only one match in the entire codebase)
+
+file: modeling_deepseek_v4.py
+lines of codes 816, 817, it doesnt handle the attention masking for padded cells at all
+further reading up on things? well, the compressor interface might have to be changed a bit for the forward func, i can look into fixes but will prefer a maintianer cus honestly? touching something like on my own has chances of needing even further repairs, i can fix it up but not worth the risk
+
+escalating to @ArthurZucker , seems we got another thing to add to the pr, i will mention the same in there","confirmed and is a rather srs bug went down hunting in the transformer and model files, 3 matches of compressor and it doesnt indeed, pass the attention mask as needed for csa - thats, the main feature for csa too, it does provide pad(only one match in the entire codebase) file: modelingdeepseekv4.py lines of codes 816, 817, it doesnt handle the attention masking for padded cells at all further reading up on things? well, the compressor interface might have to be changed a bit for the forward func, i can look into fixes but will prefer a maintianer cus honestly? touching something like on my own has chances of needing even further repairs, i can fix it up but not worth the risk escalating to , seems we got another thing to add to the pr, i will mention the same in there",open,2026-05-14 10:20:03+00:00,,issue_45938,WKQ9411,,45938,0

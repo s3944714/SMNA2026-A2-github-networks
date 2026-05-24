@@ -1,0 +1,6 @@
+repo,mean_all,mean_issues,mean_comments,pct_positive,pct_negative,n_topics,sc4_pass,sc5_pass,sc6_pass
+scikit-learn/scikit-learn,0.2528,0.1851,0.2649,59.8,21.8,43,True,True,False
+huggingface/transformers,0.2678,0.3257,0.2515,61.2,21.6,40,True,True,False
+pytorch/pytorch,0.1065,-0.0428,0.1844,47.2,32.4,3,False,True,True
+keras-team/keras,0.249,0.1049,0.2882,61.2,22.9,27,True,True,False
+langchain-ai/langchain,0.1703,-0.0861,0.2605,55.0,29.3,38,True,True,True
